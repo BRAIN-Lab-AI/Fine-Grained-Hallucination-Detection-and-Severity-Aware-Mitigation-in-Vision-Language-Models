@@ -42,6 +42,7 @@ This repository contains the official implementation of the paper "Detecting and
 
 - [Overview](#overview)
 - [Installation](#installation)
+- [Vast AI](#vast-ai)
 - [Dataset](#dataset)
 - [Training](#training)
 - [Evaluation](#evaluation)
@@ -61,6 +62,10 @@ pip install -e .
 # (Optional) Install flash-attention for faster training
 pip install -e ".[flash-attn]"
 ```
+
+## Vast AI
+
+For a repo-specific Vast AI workflow, see [VAST_AI_SETUP.md](VAST_AI_SETUP.md).
 
 ## Dataset
 

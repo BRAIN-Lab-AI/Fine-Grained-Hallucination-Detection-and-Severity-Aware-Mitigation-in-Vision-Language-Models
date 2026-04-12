@@ -4,6 +4,11 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
 build/
 develop-eggs/
 dist/
@@ -21,14 +26,18 @@ wheels/
 *.egg
 
 # Data files - these should be downloaded from HuggingFace
-hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl
-hsa_dpo/data/image/
-datasets/
+/hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl
+/hsa_dpo/data/image/
+/hsa_dpo/data/images/
+/vg/
+/datasets/
+/checkpoints/
+/playground/data/
 *.tar.gz
 
 # Model weights
-models/
-output/
+/models/
+/output/
 *.pt
 *.pth
 *.bin
@@ -51,6 +60,8 @@ tensorboard/
 
 # Environment
 .env
+.env.*
+.venv/
 venv/
 ENV/
 
