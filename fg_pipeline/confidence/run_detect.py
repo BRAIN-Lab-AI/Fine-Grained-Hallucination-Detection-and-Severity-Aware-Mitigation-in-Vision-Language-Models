@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import re
+from collections import Counter
 from typing import Iterable
 
+from fg_pipeline.confidence.parser import parse_detection_response
+from fg_pipeline.confidence.scoring import ConfidenceScorer, get_scorer
 from fg_pipeline.io_utils import read_jsonl, write_jsonl
+from fg_pipeline.paths import DEFAULT_DETECTION_INPUT
 from fg_pipeline.schemas import DetectionRecord, SentenceSignal
 
-_TYPE_RE = re.compile(r"<(object|attribute|relationship)>", re.IGNORECASE)
-_SEVERITY_RE = re.compile(r"(Minor|Moderate|Major)\s*\((\d+)\s*points?\)", re.IGNORECASE)
 _PROMPT_PREFIX = "<image>\nDescription to Assess:\n"
 
 
@@ -25,61 +26,157 @@ def _extract_response(conversations: list[dict]) -> str:
     return conversations[1].get("value", "")
 
 
-def _bootstrap_signal(raw_response: str) -> list[SentenceSignal]:
-    response = raw_response.strip()
-    if not response or response == "NO HALLUCINATION":
-        return []
+def _build_signals(
+    raw_response: str, scorer: ConfidenceScorer, record_context: dict
+) -> list[SentenceSignal]:
+    parsed = parse_detection_response(raw_response)
+    signals: list[SentenceSignal] = []
+    for item in parsed:
+        confidence, scorer_meta = scorer.score(item, record_context)
+        signals.append(
+            SentenceSignal(
+                sentence_index=item["sentence_index"],
+                hallucination_type=item["hallucination_type"],
+                severity=item["severity"],
+                confidence=float(confidence),
+                rationale=item.get("rationale"),
+                raw_label=item.get("raw_label"),
+                metadata={
+                    "source": "teacher_label",
+                    "severity_label": item.get("severity_label"),
+                    "span": item.get("span"),
+                    "tag_text": item.get("tag_text"),
+                    **scorer_meta,
+                },
+            )
+        )
+    return signals
 
-    match_type = _TYPE_RE.search(response)
-    match_severity = _SEVERITY_RE.search(response)
-    signal = SentenceSignal(
-        sentence_index=0,
-        hallucination_type=(match_type.group(1).lower() if match_type else "unknown"),
-        severity=(int(match_severity.group(2)) if match_severity else None),
-        confidence=1.0,
-        rationale=response,
-        raw_label=response,
-        metadata={"bootstrap_source": "teacher_label"},
-    )
-    return [signal]
 
-
-def build_detection_record(row: dict) -> DetectionRecord:
+def build_detection_record(row: dict, scorer: ConfidenceScorer) -> DetectionRecord:
     conversations = row.get("conversations", [])
     raw_detection = _extract_response(conversations)
+    prompt = _extract_prompt(conversations)
+    context = {
+        "sample_id": row.get("id", ""),
+        "image": row.get("image"),
+        "prompt": prompt,
+    }
     return DetectionRecord(
         sample_id=row.get("id", ""),
         image=row.get("image"),
-        prompt=_extract_prompt(conversations),
-        candidate_response=_extract_prompt(conversations),
-        signals=_bootstrap_signal(raw_detection),
+        prompt=prompt,
+        candidate_response=raw_detection,
+        signals=_build_signals(raw_detection, scorer, context),
         raw_detection=raw_detection,
-        metadata={"source_dataset": "hsa_dpo_detection"},
+        metadata={
+            "source_dataset": "hsa_dpo_detection",
+            "source_input_role": "fg_pipeline_detection_mirror",
+            "scorer": scorer.name,
+        },
     )
 
 
-def generate_records(rows: Iterable[dict], limit: int | None = None) -> list[dict]:
-    output = []
+def generate_records(
+    rows: Iterable[dict], scorer: ConfidenceScorer, limit: int | None = None
+) -> list[dict]:
+    output: list[dict] = []
     for idx, row in enumerate(rows):
         if limit is not None and idx >= limit:
             break
-        output.append(build_detection_record(row).to_dict())
+        output.append(build_detection_record(row, scorer).to_dict())
     return output
 
 
+def _is_no_hallucination(raw: str | None) -> bool:
+    return not raw or raw.strip().upper() == "NO HALLUCINATION"
+
+
+def _summarize(records: list[dict]) -> dict:
+    total = len(records)
+    no_hall_source = 0
+    parsed_rows = 0
+    unparseable_rows = 0
+    type_counts: Counter = Counter()
+    severity_counts: Counter = Counter()
+    confidences: list[float] = []
+    total_signals = 0
+    for record in records:
+        is_no_hall = _is_no_hallucination(record.get("raw_detection"))
+        if is_no_hall:
+            no_hall_source += 1
+        elif record["signals"]:
+            parsed_rows += 1
+        else:
+            unparseable_rows += 1
+        for signal in record["signals"]:
+            total_signals += 1
+            type_counts[signal.get("hallucination_type") or "unknown"] += 1
+            severity_counts[signal.get("severity")] += 1
+            confidences.append(float(signal.get("confidence", 0.0)))
+    if confidences:
+        conf_min = min(confidences)
+        conf_mean = sum(confidences) / len(confidences)
+        conf_max = max(confidences)
+    else:
+        conf_min = conf_mean = conf_max = 0.0
+    return {
+        "total_rows": total,
+        "no_hallucination_rows": no_hall_source,
+        "hallucinated_rows_parsed": parsed_rows,
+        "hallucinated_rows_unparseable": unparseable_rows,
+        "total_signals": total_signals,
+        "type_counts": dict(type_counts),
+        "severity_counts": {str(k): v for k, v in severity_counts.items()},
+        "confidence": {"min": conf_min, "mean": conf_mean, "max": conf_max},
+    }
+
+
+def _print_summary(summary: dict, output_path: str) -> None:
+    print(f"Wrote {summary['total_rows']} detection records to {output_path}")
+    print(
+        "  rows: "
+        f"no_hall={summary['no_hallucination_rows']} "
+        f"hall_parsed={summary['hallucinated_rows_parsed']} "
+        f"hall_unparseable={summary['hallucinated_rows_unparseable']} "
+        f"total_signals={summary['total_signals']}"
+    )
+    print(f"  by type:     {summary['type_counts']}")
+    print(f"  by severity: {summary['severity_counts']}")
+    c = summary["confidence"]
+    print(f"  confidence:  min={c['min']:.4f} mean={c['mean']:.4f} max={c['max']:.4f}")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Bootstrap D_det.jsonl from the released detection data.")
-    parser.add_argument("--input", required=True, help="Path to hsa_dpo_detection.jsonl")
+    parser = argparse.ArgumentParser(
+        description="Build D_det.jsonl from the Stage-3-owned detection data mirror."
+    )
+    parser.add_argument(
+        "--input",
+        default=str(DEFAULT_DETECTION_INPUT),
+        help=(
+            "Path to the detection JSONL. Defaults to "
+            f"{DEFAULT_DETECTION_INPUT.as_posix()}."
+        ),
+    )
     parser.add_argument("--output", required=True, help="Path to write D_det.jsonl")
-    parser.add_argument("--limit", type=int, default=None, help="Optional row limit for smoke tests")
+    parser.add_argument(
+        "--scorer",
+        default="bootstrap",
+        help="Confidence scorer name (default: bootstrap).",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Optional row limit for smoke tests"
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    rows = generate_records(read_jsonl(args.input), limit=args.limit)
+    scorer = get_scorer(args.scorer)
+    rows = generate_records(read_jsonl(args.input), scorer, limit=args.limit)
     write_jsonl(args.output, rows)
-    print(f"Wrote {len(rows)} detection records to {args.output}")
+    _print_summary(_summarize(rows), args.output)
     return 0
 
 

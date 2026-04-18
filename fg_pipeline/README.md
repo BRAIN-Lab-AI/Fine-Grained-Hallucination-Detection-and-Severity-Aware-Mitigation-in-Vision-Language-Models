@@ -8,7 +8,10 @@ Design rule:
 - make new outputs compatible with the original trainer before introducing new trainer logic
 
 Current reuse points:
-- detection bootstrap reads `hsa_dpo/data/hsa_dpo_detection.jsonl`
+- detection bootstrap defaults to `fg_pipeline/data/hsa_dpo_detection.jsonl`
+- `fg_pipeline/data/hsa_dpo_detection.jsonl` is a Stage-3-owned mirror of the original
+  `hsa_dpo/data/hsa_dpo_detection.jsonl` so the baseline layout remains intact
+- `fg_pipeline/paths.py` defines the extension-layer default paths used by Stage 3
 - stage 6 training reuses `hsa_dpo_train.sh`
 - the adaptive trainer stub subclasses `hsa_dpo.trainer.llava_dpo_trainer.LlavaDPOTrainer`
 

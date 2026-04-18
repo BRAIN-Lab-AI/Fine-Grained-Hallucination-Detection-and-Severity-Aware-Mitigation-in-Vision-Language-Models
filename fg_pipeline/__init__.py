@@ -2,5 +2,6 @@
 
 __all__ = [
     "io_utils",
+    "paths",
     "schemas",
 ]

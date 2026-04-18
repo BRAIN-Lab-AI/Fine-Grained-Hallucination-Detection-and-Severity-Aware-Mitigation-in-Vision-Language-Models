@@ -185,7 +185,9 @@ bash scripts/run_stage6_train.sh
 
 What these stages do today:
 
-- Stage 3 bootstraps `D_det` from `hsa_dpo/data/hsa_dpo_detection.jsonl`
+- Stage 3 bootstraps `D_det` from `fg_pipeline/data/hsa_dpo_detection.jsonl`
+  (mirrored from `hsa_dpo/data/hsa_dpo_detection.jsonl` to keep Stage 3 inputs under
+  `fg_pipeline/` without disturbing the baseline layer)
 - Stage 4 is a scaffold rewrite stage and currently uses placeholder passthrough logic
 - Stage 5 converts filtered rewrite outputs into an HSA-DPO-compatible preference format
 - Stage 6 reuses the original `hsa_dpo_train.sh` with `DATA_PATH=output/fghd/D_pref_clean.jsonl`
