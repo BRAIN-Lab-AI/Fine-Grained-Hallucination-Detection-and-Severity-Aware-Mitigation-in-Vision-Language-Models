@@ -65,3 +65,7 @@ exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", 
 
 [tool.wheel]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
