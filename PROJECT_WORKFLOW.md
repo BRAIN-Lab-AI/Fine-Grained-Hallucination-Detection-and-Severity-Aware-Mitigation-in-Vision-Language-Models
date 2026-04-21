@@ -108,8 +108,8 @@ Notation: `x_i` = image + instruction, `yhat_i` = candidate LVLM response, `y_i`
 - Process: train/run detector `M_det(x_i, yhat_i^j) → (h_type^j, HS^j, c^j)`.
 - Output: `H_i = {(h_type^j, HS^j, c^j)}_{j=1..T}`; implicit dataset `D_det = {(x_i, yhat_i, H_i)}`.
 - Novelty: introduces `c^j` — the load-bearing symbol that threads through Stages 4–6.
-- Locked decision: `c^j` = token log-probability (exp-normalized over the emitted type/severity span).
-- Current repo state: Batch 1 landed parser + `ConfidenceScorer` protocol + `BootstrapScorer` placeholder (`c^j = 1.0`, `is_placeholder = True`). Real `LogProbScorer` lands in Batch 2.
+- Locked decision: `c^j` = token log-probability (exp-normalized over the emitted type/severity span), followed by optional post-hoc temperature scaling for threshold selection.
+- Current repo state: implemented in `fg_pipeline/confidence/` with parser, real `LogProbScorer`, calibration utilities, `run_detect.py`, and `run_calibrate.py`. Calibration writes both `D_det_calibrated.jsonl` and `D_det_calibration.json` with group-conditional `tau_{type,severity}`.
 
 ### Stage 4 — Confidence-Guided Detect-then-Rewrite *(ours)*
 
@@ -120,7 +120,7 @@ Notation: `x_i` = image + instruction, `yhat_i` = candidate LVLM response, `y_i`
   2. Rewrite: `y_i = M_wri(yhat_i, H_i^filtered)`.
 - Output: `D_rewrite = {(x_i, yhat_i, y_i, H_i^filtered)}`.
 - Novelty: rewrites are conditioned only on high-confidence hallucinations — noisy signals are dropped before they can poison the rewrite.
-- Current repo state: placeholder passthrough in [fg_pipeline/rewrite/run_rewrite.py](fg_pipeline/rewrite/run_rewrite.py). Real `M_wri` not yet wired.
+- Current repo state: implemented in `fg_pipeline/rewrite/` with a backend registry, smoke-only `template` backend, and real `llava` rewrite backend. `run_rewrite.py` accepts either a global `τ` or `--threshold-report` from Stage 3 calibration.
 
 ### Stage 5 — Verification & Filtering *(ours)*
 
@@ -132,7 +132,7 @@ Notation: `x_i` = image + instruction, `yhat_i` = candidate LVLM response, `y_i`
   3. Keep if `c̄_i > τ_c`.
 - Output: `D_pref^clean = {(x_i, yhat_i, y_i, H_i)}`.
 - Novelty: pair-level confidence gate `τ_c` is our second confidence threshold; `τ` (Stage 4) and `τ_c` (Stage 5) operate at different granularities.
-- Current repo state: heuristic filter in [fg_pipeline/verification/run_verify.py](fg_pipeline/verification/run_verify.py); real verifier not yet wired; Stage 5→6 image bridge still unresolved.
+- Current repo state: implemented in `fg_pipeline/verification/` with heuristic verification, CRC / CV-CRC threshold selection, `run_select_threshold.py`, and `run_verify.py`. Stage 5 writes Stage 6-compatible rows including `image`, `pair_confidence`, `severity_weight`, and `adaptive_weight`.
 
 ### Stage 6 — Adaptive Severity-Aware DPO *(ours)*
 
@@ -145,7 +145,7 @@ Notation: `x_i` = image + instruction, `yhat_i` = candidate LVLM response, `y_i`
      `L = −log σ( β [ log π_θ(y_i|x_i) / π_ref(y_i|x_i) − S_i^adaptive · log π_θ(yhat_i|x_i) / π_ref(yhat_i|x_i) ] )`.
 - Output: hallucination-mitigated LVLM `π_θ*`.
 - Novelty vs baseline HSA-DPO: baseline weights by severity alone (`HS^j`). Ours weights by **`c^j · HS^j`** — confidence × severity — threaded from Stage 3.
-- Current repo state: adaptive-loss stub in [fg_pipeline/adaptive_dpo/](fg_pipeline/adaptive_dpo/); Stage 6 still reuses the original trainer path.
+- Current repo state: the Stage 6 bridge is implemented. `train_dpo.py` now prefers the Stage 5 `image` field, threads `pair_confidence`, `severity_weight`, and `adaptive_weight`, and uses `AdaptiveLlavaDPOTrainer`. The known operational constraint is hardware: the current paper-like setup should run on a real 2-GPU box.
 
 ## Compact Pipeline View
 
@@ -165,28 +165,23 @@ One-line summary: **confidence-aware detection → filtered rewriting → verifi
 
 ## What Exists Today
 
-- Stage 3 has a Batch 1 scaffold in `fg_pipeline/confidence/` (parser + scorer interface + bootstrap scorer + tests + diagnostics).
-- Stage 4 is still placeholder rewrite logic.
-- Stage 5 is still heuristic filtering.
-- Stage 6 still reuses the original trainer.
-- Open decisions: `τ` (Stage 4 signal filter), `τ_c` (Stage 5 pair filter), Stage 5→6 image bridge.
+- Stage 3 detection, calibration, and grouped threshold reporting are implemented.
+- Stage 4 real rewrite is implemented through the `llava` backend; the `template` backend remains smoke-only.
+- Stage 5 verification and `tau_c` selection are implemented; the current verifier is heuristic, so threshold guarantees are relative to that verifier.
+- Stage 6 adaptive DPO wiring is implemented and tested, but the paper-like configuration still needs a suitable multi-GPU machine.
 
-This means the project structure is ready, but the new research method is not fully implemented yet.
+This means the research pipeline is implemented at the repo level; remaining work is primarily GPU execution, threshold tuning, and stronger verification if you want tighter paper-level guarantees.
 
 ## What We Will Do Next
 
-We start with Stage 3.
-
-1. Fix the `candidate_response` / `raw_detection` semantics (Batch 2 cleanup).
-2. Implement real `c^j` via `LogProbScorer` registered against the existing `ConfidenceScorer` protocol.
-3. Keep Stage 3 output compatible with Stage 4, Stage 5, and Stage 6.
-4. After Stage 3 is stable, replace Stage 4 placeholder rewrite logic.
-5. Then fix the Stage 5 to Stage 6 bridge so clean pairs match trainer expectations.
-6. Finally wire confidence-weighted severity into Stage 6 training.
+1. Run Stage 3 with the real `log_prob` scorer on the target GPU box and persist `D_det.jsonl`.
+2. Use the calibrated/grouped Stage 4 -> Stage 5 path to regenerate `D_pref_clean_grouped.jsonl`.
+3. Run Stage 6 on a real 2-GPU machine for the paper-like configuration.
+4. Strengthen Stage 5 threshold selection with either a better verifier or a manually audited subset if you want stronger empirical guarantees.
 
 ## Immediate Team Focus
 
-- Read from `fg_pipeline/data/hsa_dpo_detection.jsonl` for Stage 3 work.
-- Edit inside `fg_pipeline/` first.
-- Treat `hsa_dpo/` as the baseline layer.
-- Keep changes small and traceable by stage.
+- Treat this local repo as the canonical development copy; Vast was only a run environment.
+- Keep `hsa_dpo/` as the baseline layer and place new logic in `fg_pipeline/` or the stage scripts unless a compatibility patch is required.
+- Use `scripts/run_calibrated_pipeline.sh` for the calibrated Stage 3-5 path.
+- Use a 2-GPU box for real Stage 6 runs; the 1x 32 GB setup is expected to OOM.

@@ -33,5 +33,5 @@ echo "Vast AI bootstrap completed."
 echo
 echo "Next steps:"
 echo "1. source .venv/bin/activate"
-echo "2. huggingface-cli download liuhaotian/llava-v1.5-13b --local-dir ./models/llava-v1.5-13b"
-echo "3. bash hsa_dpo_train.sh"
+echo "2. hf download liuhaotian/llava-v1.5-13b --local-dir ./models/llava-v1.5-13b"
+echo "3. bash scripts/run_calibrated_pipeline.sh"

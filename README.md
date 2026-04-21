@@ -85,7 +85,7 @@ For a repo-specific Vast AI workflow, see [VAST_AI_SETUP.md](VAST_AI_SETUP.md).
 pip install -U huggingface_hub
 
 # Download all dataset files
-huggingface-cli download --repo-type dataset WenyiXiao/HSA-DPO --local-dir ./datasets
+hf download --repo-type dataset WenyiXiao/HSA-DPO --local-dir ./datasets
 ```
 
 ### Dataset Organization
@@ -147,7 +147,7 @@ pip install -e .
 3. Download the base LLaVA-v1.5 model:
 ```bash
 # Download LLaVA-v1.5-13B model
-huggingface-cli download liuhaotian/llava-v1.5-13b --local-dir ./models/llava-v1.5-13b
+hf download liuhaotian/llava-v1.5-13b --local-dir ./models/llava-v1.5-13b
 
 # The CLIP vision encoder will be auto-downloaded during training
 ```
@@ -178,30 +178,32 @@ Current stage launchers:
 
 ```bash
 bash scripts/run_stage3_confidence.sh
+bash scripts/run_stage3_calibrate.sh
 bash scripts/run_stage4_rewrite.sh
+bash scripts/run_stage5_select_threshold.sh
 bash scripts/run_stage5_verify.sh
+bash scripts/run_calibrated_pipeline.sh
 bash scripts/run_stage6_train.sh
 ```
 
 What these stages do today:
 
-- Stage 3 bootstraps `D_det` from `fg_pipeline/data/hsa_dpo_detection.jsonl`
-  (mirrored from `hsa_dpo/data/hsa_dpo_detection.jsonl` to keep Stage 3 inputs under
-  `fg_pipeline/` without disturbing the baseline layer)
-- Stage 4 is a scaffold rewrite stage and currently uses placeholder passthrough logic
-- Stage 5 converts filtered rewrite outputs into an HSA-DPO-compatible preference format
-- Stage 6 reuses the original `hsa_dpo_train.sh` with `DATA_PATH=output/fghd/D_pref_clean.jsonl`
+- Stage 3 runs confidence-aware detection, then calibrates the stored severity log-probs into `D_det_calibrated.jsonl` and a group-conditional threshold report
+- Stage 4 rewrites with either a smoke-only `template` backend or the real `llava` backend; it can use either a global `tau` or the calibrated threshold report
+- Stage 5 selects `tau_c` with CRC / CV-CRC and then verifies pairs into `D_pref_clean_grouped.jsonl`
+- Stage 6 reuses the original HSA-DPO training stack, but now reads Stage 5 `image` paths directly and uses adaptive example weights
 
 Current status:
 
-- the extension layer is ready as a project scaffold
-- baseline HSA-DPO training works through the original code path
-- a real rewrite model still needs to be added before the full new pipeline can produce useful clean preference pairs
+- Stage 3-6 are implemented at the repo level
+- the recommended end-to-end entrypoint is `bash scripts/run_calibrated_pipeline.sh`
+- the current Stage 5 verifier is heuristic, so CRC / CV-CRC guarantees are relative to that verifier rather than absolute ground truth
+- the paper-like Stage 6 configuration should be run on a real 2-GPU box; the current 1x 32 GB setup is expected to OOM
 
 ### Key Parameters
 
 - `use_chosen_score`: Whether to use chosen scores in DPO loss (default: False)
-- `use_rejected_score`: Whether to use rejected scores in DPO loss (default: True)
+- `use_rejected_score`: Whether to use rejected scores in DPO loss (default: False in the Stage 6 wrapper so adaptive weighting is not double-counted)
 - `beta`: Temperature parameter for DPO loss (default: 0.1)
 - `num_train_epochs`: Number of training epochs (default: 2)
 - `per_device_train_batch_size`: Batch size per GPU (default: 8)
@@ -214,6 +216,12 @@ The script supports multi-GPU training with DeepSpeed. Adjust `NUM_GPUS` in the 
 ```bash
 NUM_GPUS=2  # Use 2 GPUs
 bash hsa_dpo_train.sh
+```
+
+For the calibrated extension pipeline on a suitable multi-GPU machine:
+
+```bash
+RUN_STAGE6=true MODEL_PATH=models/llava-v1.5-13b IMAGE_ROOT="$(pwd)" bash scripts/run_calibrated_pipeline.sh
 ```
 
 ## Evaluation

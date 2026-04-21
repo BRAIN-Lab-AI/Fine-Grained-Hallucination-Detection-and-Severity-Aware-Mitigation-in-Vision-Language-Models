@@ -145,7 +145,8 @@ What it does:
 - creates `.venv` if needed
 - upgrades `pip`, `setuptools`, and `wheel`
 - installs this repo in editable mode with Linux training extras
-- installs `huggingface_hub` and `modelscope`
+- installs a `huggingface_hub` version compatible with this repo's `transformers` / LLaVA stack
+- installs `modelscope`
 
 What it does **not** do:
 
@@ -159,47 +160,56 @@ Run this on the Vast instance after the bootstrap script:
 
 ```bash
 source .venv/bin/activate
-huggingface-cli download liuhaotian/llava-v1.5-13b --local-dir ./models/llava-v1.5-13b
+hf download liuhaotian/llava-v1.5-13b --local-dir ./models/llava-v1.5-13b
 ```
 
 The training script already points to:
 
 - `MODEL_PATH="./models/llava-v1.5-13b"`
 
-## 7. Step 6: Verify Repo Paths Before Training
+## 7. Step 6: Verify Repo Paths Before Running The Pipeline
 
-This repo currently uses:
+This repo now has two image/data paths that matter:
 
-- preference data: `./hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl`
-- images: `./hsa_dpo/data/images`
+- Stage 3 detection input: `./hsa_dpo/data/hsa_dpo_detection.jsonl`
+- Visual Genome images for Stages 3-5: `./vg/images`
 - model path: `./models/llava-v1.5-13b`
+- Stage 5 / Stage 6 preference output: `./output/fghd/D_pref_clean_grouped.jsonl`
 
-The local image directory is `images`, not `image`.
+Stage 6 now reads image paths from the Stage 5 `image` field directly, so the repo root is the correct `IMAGE_FOLDER` for the current pipeline.
 
-## 8. Step 7: Adjust The Training Script For The Remote GPU
+## 8. Step 7: Run The Calibrated Stage 3-5 Pipeline
 
-Edit `hsa_dpo_train.sh` on the remote machine only if needed.
-
-The settings you are most likely to change are:
-
-- `NUM_GPUS`
-- `BATCH_SIZE`
-- `MODEL_PATH`
-- `OUTPUT_DIR`
-
-Examples:
-
-- if the instance has 1 GPU, set `NUM_GPUS=1`
-- if VRAM is tight, reduce `BATCH_SIZE`
-
-## 9. Step 8: Start Training
-
-Run this on the Vast instance:
+The recommended remote entrypoint is:
 
 ```bash
 source .venv/bin/activate
-bash hsa_dpo_train.sh
+RUN_STAGE6=auto MODEL_PATH=models/llava-v1.5-13b IMAGE_ROOT="$(pwd)" bash scripts/run_calibrated_pipeline.sh
 ```
+
+What this does:
+
+- reruns Stage 3 calibration from `output/fghd/D_det.jsonl`
+- runs Stage 4 grouped rewrite with the calibrated threshold report
+- selects `tau_c` with CRC / CV-CRC
+- runs Stage 5 final verification
+- starts Stage 6 only when the machine has enough GPUs for the current setup
+
+If the instance has fewer GPUs than required for Stage 6, the script stops cleanly after Stage 5.
+
+## 9. Step 8: Start Stage 6 Only On A Suitable GPU Box
+
+If you are on a real 2-GPU box and already have `output/fghd/D_pref_clean_grouped.jsonl`, run:
+
+```bash
+source .venv/bin/activate
+DATA_PATH=output/fghd/D_pref_clean_grouped.jsonl \
+IMAGE_FOLDER="$(pwd)" \
+MODEL_PATH=models/llava-v1.5-13b \
+bash scripts/run_stage6_train.sh
+```
+
+If the instance only has 1 GPU with 32 GB VRAM, the current Stage 6 configuration is expected to OOM. Use a larger box rather than forcing the same training setup onto that machine.
 
 For a smaller first validation run, use:
 
@@ -221,8 +231,8 @@ tmux attach -t hsa-dpo
 
 If you want to make the Vast AI workflow cleaner, the next repo changes should be:
 
-1. make `hsa_dpo_train.sh` fail fast when `deepspeed` is missing
-2. add a single-GPU fallback script for non-DeepSpeed runs
+1. add a stronger Stage 5 verifier if you want `tau_c` selection to be grounded in something stronger than the current heuristic backend
+2. add a manually audited calibration subset if you want tighter paper-level claims around threshold selection
 3. add a small env file or shell file for per-instance overrides
 4. add checkpoint sync instructions for downloading results back to your laptop
 
@@ -238,14 +248,16 @@ If you want to make the Vast AI workflow cleaner, the next repo changes should b
 
 ### In this repo
 
-1. keep `hsa_dpo_train.sh`
+1. keep `hsa_dpo_train.sh` as the baseline training entrypoint
 2. use `scripts/vastai/bootstrap.sh`
-3. use this document as the project-specific checklist
-4. put machine-specific overrides in ignored `scripts/vastai/*.local.*` files rather than editing tracked setup docs for each instance
+3. use `scripts/run_calibrated_pipeline.sh` for the calibrated Stage 3-5 flow
+4. use this document as the project-specific checklist
+5. put machine-specific overrides in ignored `scripts/vastai/*.local.*` files rather than editing tracked setup docs for each instance
 
 ### On the Vast instance
 
 1. clone repo
 2. run `bash scripts/vastai/bootstrap.sh`
 3. download LLaVA base model
-4. run `bash hsa_dpo_train.sh`
+4. run `bash scripts/run_calibrated_pipeline.sh`
+5. run Stage 6 separately on a 2-GPU box if needed

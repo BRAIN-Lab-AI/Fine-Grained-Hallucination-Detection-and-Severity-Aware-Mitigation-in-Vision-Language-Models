@@ -5,27 +5,18 @@ from torch.utils.data import Sampler
 from enum import Enum
 
 from transformers import Trainer
-try:
-    from transformers.trainer import (
-        is_sagemaker_mp_enabled,
-        get_parameter_names,
-        has_length,
-        ALL_LAYERNORM_LAYERS,
-        ShardedDDPOption,
-        logger,
-    )
-except ImportError:
-    from transformers.trainer import (
-        is_sagemaker_mp_enabled,
-        get_parameter_names,
-        has_length,
-        ALL_LAYERNORM_LAYERS,
-        logger,
-    )
-
-    class ShardedDDPOption(str, Enum):
-        SIMPLE = "simple"
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.trainer_pt_utils import get_parameter_names
+from transformers.trainer_utils import has_length
+from transformers.utils import is_sagemaker_mp_enabled, logging
 from typing import List, Optional
+
+
+logger = logging.get_logger(__name__)
+
+
+class ShardedDDPOption(str, Enum):
+    SIMPLE = "simple"
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
