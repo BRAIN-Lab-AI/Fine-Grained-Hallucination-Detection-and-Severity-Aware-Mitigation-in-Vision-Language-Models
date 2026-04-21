@@ -116,6 +116,12 @@ class ScriptArguments:
     beta: Optional[float] = field(default=0.5, metadata={"help": "the beta parameter for DPO loss"})
     use_chosen_score: Optional[bool] = field(default=False, metadata={"help": "whether to use chosen score in DPO loss"})
     use_rejected_score: Optional[bool] = field(default=True, metadata={"help": "whether to use rejected score in DPO loss"})
+    use_adaptive_example_weight: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "whether to apply outer example weighting after the paper-style inner adaptive DPO objective"
+        },
+    )
     
     # training parameters
     learning_rate: Optional[float] = field(default=5e-4, metadata={"help": "optimizer learning rate"})
@@ -820,6 +826,7 @@ def main():
         beta=script_args.beta,
         use_chosen_score=script_args.use_chosen_score,
         use_rejected_score=script_args.use_rejected_score,
+        use_adaptive_example_weight=script_args.use_adaptive_example_weight,
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_length=script_args.max_length,

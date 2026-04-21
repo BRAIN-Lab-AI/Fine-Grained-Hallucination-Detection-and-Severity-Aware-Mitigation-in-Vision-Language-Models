@@ -1,19 +1,42 @@
 from __future__ import annotations
 
 import torch
-from typing import Literal
+from typing import Any, Literal
 
 from fg_pipeline.adaptive_dpo.adaptive_loss import adaptive_example_weight
 from hsa_dpo.trainer.llava_dpo_trainer import LlavaDPOTrainer
 
 
 class AdaptiveLlavaDPOTrainer(LlavaDPOTrainer):
-    """Small extension hook for later adaptive DPO integration.
+    """Stage 6 adaptive trainer.
 
-    This class deliberately avoids changing the original trainer behavior.
-    It only adds a helper for weighted example reduction so future work can
-    wire pair-level confidence and severity into the final loss.
+    Default behavior follows the paper-style Stage 6 objective:
+    ``severity_weight`` scales the rejected term inside the DPO logit, while
+    outer example reweighting stays optional.
     """
+
+    def __init__(
+        self,
+        *args: Any,
+        use_adaptive_example_weight: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        self.use_adaptive_example_weight = bool(use_adaptive_example_weight)
+        super().__init__(*args, **kwargs)
+
+    def resolve_rejected_scores(
+        self,
+        rejected_scores: torch.Tensor,
+        severity_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Prefer Stage 5 ``severity_weight`` for the inner DPO objective."""
+
+        if severity_weights is None:
+            return rejected_scores
+        return severity_weights.to(
+            device=rejected_scores.device,
+            dtype=rejected_scores.dtype,
+        )
 
     def reduce_weighted_losses(
         self,
@@ -61,23 +84,26 @@ class AdaptiveLlavaDPOTrainer(LlavaDPOTrainer):
                 _,
             ) = self.concatenated_forward(self.ref_model, inputs)
 
+        pair_confidences = inputs.get("pair_confidences")
+        severity_weights = inputs.get("severity_weights")
+        adaptive_weights = inputs.get("adaptive_weights")
         losses, chosen_rewards, rejected_rewards = self.dpo_loss(
             policy_chosen_logps,
             policy_rejected_logps,
             reference_chosen_logps,
             reference_rejected_logps,
             chosen_scores,
-            rejected_scores,
+            self.resolve_rejected_scores(rejected_scores, severity_weights),
         )
-        pair_confidences = inputs.get("pair_confidences")
-        severity_weights = inputs.get("severity_weights")
-        adaptive_weights = inputs.get("adaptive_weights")
-        loss = self.reduce_weighted_losses(
-            losses,
-            adaptive_weights=adaptive_weights,
-            pair_confidences=pair_confidences,
-            severity_weights=severity_weights,
-        )
+        if self.use_adaptive_example_weight:
+            loss = self.reduce_weighted_losses(
+                losses,
+                adaptive_weights=adaptive_weights,
+                pair_confidences=pair_confidences,
+                severity_weights=severity_weights,
+            )
+        else:
+            loss = losses.mean()
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
         prefix = "eval_" if train_eval == "eval" else ""
@@ -91,9 +117,12 @@ class AdaptiveLlavaDPOTrainer(LlavaDPOTrainer):
         metrics[f"referece_{prefix}logps/chosen"] = reference_chosen_logps.detach().cpu().mean()
         metrics[f"{prefix}logits/rejected"] = policy_rejected_logits
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits
+        metrics[f"{prefix}adaptive/outer_weighting_enabled"] = float(
+            self.use_adaptive_example_weight
+        )
         if adaptive_weights is not None:
             metrics[f"{prefix}adaptive/weight_mean"] = adaptive_weights.detach().cpu().mean()
-        elif pair_confidences is not None and severity_weights is not None:
+        if pair_confidences is not None and severity_weights is not None:
             metrics[f"{prefix}adaptive/pair_confidence_mean"] = pair_confidences.detach().cpu().mean()
             metrics[f"{prefix}adaptive/severity_weight_mean"] = severity_weights.detach().cpu().mean()
 

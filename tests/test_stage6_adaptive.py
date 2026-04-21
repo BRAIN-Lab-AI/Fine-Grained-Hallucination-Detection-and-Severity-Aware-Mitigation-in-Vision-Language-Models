@@ -124,6 +124,122 @@ class AdaptiveReductionTests(unittest.TestCase):
         )
         self.assertAlmostEqual(reduced.item(), float(expected), places=6)
 
+    def test_resolve_rejected_scores_prefers_severity_weights(self) -> None:
+        trainer = AdaptiveLlavaDPOTrainer.__new__(AdaptiveLlavaDPOTrainer)
+        rejected_scores = torch.tensor([1.0, 1.0], dtype=torch.float32)
+        severity_weights = torch.tensor([2.0, 3.0], dtype=torch.float32)
+        resolved = trainer.resolve_rejected_scores(
+            rejected_scores,
+            severity_weights=severity_weights,
+        )
+        self.assertTrue(torch.equal(resolved, severity_weights))
+
+    def test_get_batch_metrics_uses_inner_severity_weighting_by_default(self) -> None:
+        trainer = AdaptiveLlavaDPOTrainer.__new__(AdaptiveLlavaDPOTrainer)
+        trainer.use_adaptive_example_weight = False
+        trainer.model = object()
+        trainer.ref_model = object()
+
+        captured: dict[str, torch.Tensor] = {}
+
+        policy_tuple = (
+            torch.tensor([0.8, 0.4], dtype=torch.float32),
+            torch.tensor([0.5, 0.1], dtype=torch.float32),
+            torch.tensor(0.0),
+            torch.tensor(0.0),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+        )
+        reference_tuple = (
+            torch.tensor([0.2, 0.1], dtype=torch.float32),
+            torch.tensor([0.1, 0.0], dtype=torch.float32),
+            torch.tensor(0.0),
+            torch.tensor(0.0),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+        )
+
+        def fake_concatenated_forward(model, inputs):
+            return policy_tuple if model is trainer.model else reference_tuple
+
+        def fake_dpo_loss(
+            policy_chosen_logps,
+            policy_rejected_logps,
+            reference_chosen_logps,
+            reference_rejected_logps,
+            chosen_scores,
+            rejected_scores,
+            reference_free=False,
+        ):
+            captured["rejected_scores"] = rejected_scores.detach().cpu()
+            return (
+                torch.tensor([1.0, 3.0], dtype=torch.float32),
+                torch.tensor([0.6, 0.3], dtype=torch.float32),
+                torch.tensor([0.2, 0.1], dtype=torch.float32),
+            )
+
+        trainer.concatenated_forward = fake_concatenated_forward
+        trainer.dpo_loss = fake_dpo_loss
+        inputs = {
+            "pair_confidences": torch.tensor([0.5, 0.8], dtype=torch.float32),
+            "severity_weights": torch.tensor([2.0, 3.0], dtype=torch.float32),
+            "adaptive_weights": torch.tensor([1.0, 4.0], dtype=torch.float32),
+        }
+
+        loss, metrics = trainer.get_batch_metrics(inputs)
+
+        self.assertTrue(
+            torch.equal(
+                captured["rejected_scores"],
+                torch.tensor([2.0, 3.0], dtype=torch.float32),
+            )
+        )
+        self.assertAlmostEqual(loss.item(), 2.0, places=6)
+        self.assertEqual(metrics["adaptive/outer_weighting_enabled"], 0.0)
+
+    def test_get_batch_metrics_can_optionally_apply_outer_weighting(self) -> None:
+        trainer = AdaptiveLlavaDPOTrainer.__new__(AdaptiveLlavaDPOTrainer)
+        trainer.use_adaptive_example_weight = True
+        trainer.model = object()
+        trainer.ref_model = object()
+
+        policy_tuple = (
+            torch.tensor([0.8, 0.4], dtype=torch.float32),
+            torch.tensor([0.5, 0.1], dtype=torch.float32),
+            torch.tensor(0.0),
+            torch.tensor(0.0),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+        )
+        reference_tuple = (
+            torch.tensor([0.2, 0.1], dtype=torch.float32),
+            torch.tensor([0.1, 0.0], dtype=torch.float32),
+            torch.tensor(0.0),
+            torch.tensor(0.0),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+        )
+
+        trainer.concatenated_forward = (
+            lambda model, inputs: policy_tuple if model is trainer.model else reference_tuple
+        )
+        trainer.dpo_loss = lambda *args, **kwargs: (
+            torch.tensor([1.0, 3.0], dtype=torch.float32),
+            torch.tensor([0.6, 0.3], dtype=torch.float32),
+            torch.tensor([0.2, 0.1], dtype=torch.float32),
+        )
+
+        loss, metrics = trainer.get_batch_metrics(
+            {
+                "pair_confidences": torch.tensor([0.5, 0.8], dtype=torch.float32),
+                "severity_weights": torch.tensor([2.0, 3.0], dtype=torch.float32),
+                "adaptive_weights": torch.tensor([1.0, 4.0], dtype=torch.float32),
+            }
+        )
+
+        self.assertAlmostEqual(loss.item(), 2.6, places=6)
+        self.assertEqual(metrics["adaptive/outer_weighting_enabled"], 1.0)
+
 
 class StageBoundaryCompatibilityTests(unittest.TestCase):
     def test_stage3_to_stage6_schema_handoff_is_consistent(self) -> None:

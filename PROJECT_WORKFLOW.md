@@ -18,7 +18,8 @@ For the full research method, see [README.md](README.md).
 - **There is now a one-shot calibrated pipeline entrypoint.** [scripts/run_calibrated_pipeline.sh](scripts/run_calibrated_pipeline.sh) runs Stage 3 calibration -> Stage 4 grouped rewrite -> Stage 5 `tau_c` selection -> Stage 5 verification, and starts Stage 6 automatically only when the available GPU count meets the configured minimum.
 - **Stage 4** ([fg_pipeline/rewrite/](fg_pipeline/rewrite/)): `D_det -> D_rewrite` is implemented with strict `c^j > τ` filtering, backend registry, smoke-only `template` rewrite backend, and real `llava` backend path. `D_rewrite` now carries `sample_id`, `image`, `prompt`, `source_response`, `rewritten_response`, `filtered_signals`, and rewrite metadata.
 - **Stage 5** ([fg_pipeline/verification/](fg_pipeline/verification/)): `D_rewrite -> D_pref_clean` is implemented as filter-and-validate, not confidence redefinition. It uses the carried Stage 3 `c^j` values, applies strict `pair_confidence > τ_c`, verifies `rewritten_response != source_response`, and emits `id`, `question`, `chosen`, `rejected`, `image`, `pair_confidence`, `severity_weight`, `adaptive_weight`, plus metadata.
-- **Stage 6 bridge** ([hsa_dpo/models/llava-v1_5/train_dpo.py](hsa_dpo/models/llava-v1_5/train_dpo.py), [fg_pipeline/adaptive_dpo/](fg_pipeline/adaptive_dpo/)): training now prefers the Stage 5 `image` field instead of reconstructing paths from `id`, threads `pair_confidence`, `severity_weight`, and `adaptive_weight` through dataset + collator, and uses `AdaptiveLlavaDPOTrainer` to reduce losses with adaptive example weights. [scripts/run_stage6_train.sh](scripts/run_stage6_train.sh) now defaults `IMAGE_FOLDER` to repo root and `USE_REJECTED_SCORE=False` so adaptive weighting is not double-counted by default.
+- **Stage 6 bridge** ([hsa_dpo/models/llava-v1_5/train_dpo.py](hsa_dpo/models/llava-v1_5/train_dpo.py), [fg_pipeline/adaptive_dpo/](fg_pipeline/adaptive_dpo/)): training now prefers the Stage 5 `image` field instead of reconstructing paths from `id`, threads `pair_confidence`, `severity_weight`, and `adaptive_weight` through dataset + collator, and uses `AdaptiveLlavaDPOTrainer` to put `severity_weight` inside the rejected DPO term by default. [scripts/run_stage6_train.sh](scripts/run_stage6_train.sh) now defaults `IMAGE_FOLDER` to repo root, `USE_REJECTED_SCORE=True`, and keeps outer `USE_ADAPTIVE_EXAMPLE_WEIGHT=False` unless you intentionally want an extra weighting variant.
+- **Repo-owned evaluation is now in place.** [fg_pipeline/eval/](fg_pipeline/eval/) adds a project-owned comparison layer for the paper-core benchmarks (`mhalubench`, `mfhallubench`, `object_halbench`, `amber`, `mmhal_bench`, `pope_adv`, `llava_bench_wild`, `hss`) plus Stage 3-6 general metrics. The shell entrypoints are [scripts/run_paper_eval.sh](scripts/run_paper_eval.sh) and [scripts/run_general_eval.sh](scripts/run_general_eval.sh).
 - **Stage compatibility review**: Stage `3 -> 4 -> 5 -> 6` was re-checked after the Stage 6 changes. The shared schema handoff is now compatible end to end: Stage 3 preserves `image/prompt/candidate_response/signals`, Stage 4 preserves `image/prompt/source_response/rewritten_response/filtered_signals`, Stage 5 preserves `image/question/chosen/rejected/pair_confidence/severity_weight/adaptive_weight`, and Stage 6 now consumes those fields directly.
 - **Remaining execution work**: no GPU/DeepSpeed training run was executed in this environment. The next practical step is an end-to-end GPU run with calibrated `τ` / `τ_c` and, for real research data, a non-`template` Stage 4 rewrite backend. The `template` backend remains smoke-only and should not be treated as final Stage 4 data.
 
@@ -51,6 +52,7 @@ The repo has two layers.
 │   ├── rewrite/                                  ← Stage 4
 │   ├── verification/                             ← Stage 5
 │   ├── adaptive_dpo/                             ← Stage 6
+│   ├── eval/                                     ← paper/general evaluation layer
 │   ├── paths.py                                  ← fg_pipeline-owned default paths
 │   ├── schemas.py                                ← shared row formats
 │   └── io_utils.py                               ← JSONL helpers
@@ -59,7 +61,9 @@ The repo has two layers.
 │   ├── run_stage3_confidence.sh
 │   ├── run_stage4_rewrite.sh
 │   ├── run_stage5_verify.sh
-│   └── run_stage6_train.sh
+│   ├── run_stage6_train.sh
+│   ├── run_paper_eval.sh
+│   └── run_general_eval.sh
 │
 ├── tests/
 │   └── test_stage3_parser.py                     ← Stage 3 unit tests
@@ -145,7 +149,7 @@ Notation: `x_i` = image + instruction, `yhat_i` = candidate LVLM response, `y_i`
      `L = −log σ( β [ log π_θ(y_i|x_i) / π_ref(y_i|x_i) − S_i^adaptive · log π_θ(yhat_i|x_i) / π_ref(yhat_i|x_i) ] )`.
 - Output: hallucination-mitigated LVLM `π_θ*`.
 - Novelty vs baseline HSA-DPO: baseline weights by severity alone (`HS^j`). Ours weights by **`c^j · HS^j`** — confidence × severity — threaded from Stage 3.
-- Current repo state: the Stage 6 bridge is implemented. `train_dpo.py` now prefers the Stage 5 `image` field, threads `pair_confidence`, `severity_weight`, and `adaptive_weight`, and uses `AdaptiveLlavaDPOTrainer`. The known operational constraint is hardware: the current paper-like setup should run on a real 2-GPU box.
+- Current repo state: the Stage 6 bridge is implemented. `train_dpo.py` now prefers the Stage 5 `image` field, threads `pair_confidence`, `severity_weight`, and `adaptive_weight`, and uses `AdaptiveLlavaDPOTrainer` to apply `severity_weight` in the inner DPO objective by default. Optional outer example weighting remains available as an explicit variant. The known operational constraint is hardware: the current paper-like setup should run on a real 2-GPU box.
 
 ## Compact Pipeline View
 
@@ -281,6 +285,36 @@ bash scripts/run_calibrated_pipeline.sh
 - Stage 6 is expected to OOM on a `1x RTX 4080 SUPER 32 GB` box with the current paper-like configuration.
 - The current Stage 5 verifier is heuristic, so CRC / CV-CRC threshold guarantees are relative to that verifier.
 - The `template` Stage 4 backend remains smoke-only; use `llava` for real pipeline runs.
+
+## Evaluation Guide
+
+The repo now has two evaluation entrypoints.
+
+- `bash scripts/run_paper_eval.sh`
+  Runs the paper-core wrapper and writes:
+  `output/eval/<run_name>/comparison/paper_core.{json,md}` plus `summary.csv`.
+- `bash scripts/run_general_eval.sh`
+  Summarizes Stage 3-6 local metrics and any selected public benchmark subset.
+
+Evaluation is manifest-driven. The runner expects:
+
+- one base `LLaVA-1.5-13B` row
+- one local improved model row
+- `model_base` when the model kind is `lora`
+
+Judge-based metrics currently include:
+
+- `llava_bench_wild`
+- `mmhal_bench`
+- `hss`
+
+These require `OPENAI_API_KEY` and `OPENAI_JUDGE_MODEL`.
+
+The generated reports explicitly separate:
+
+- paper reference values
+- locally reproduced values
+- local proxy values that are not yet strictly paper-comparable
 
 ## Immediate Team Focus
 

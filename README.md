@@ -186,12 +186,20 @@ bash scripts/run_calibrated_pipeline.sh
 bash scripts/run_stage6_train.sh
 ```
 
+Evaluation launchers:
+
+```bash
+bash scripts/run_paper_eval.sh
+bash scripts/run_general_eval.sh
+python -m fg_pipeline.eval.run_eval --help
+```
+
 What these stages do today:
 
 - Stage 3 runs confidence-aware detection, then calibrates the stored severity log-probs into `D_det_calibrated.jsonl` and a group-conditional threshold report
 - Stage 4 rewrites with either a smoke-only `template` backend or the real `llava` backend; it can use either a global `tau` or the calibrated threshold report
 - Stage 5 selects `tau_c` with CRC / CV-CRC and then verifies pairs into `D_pref_clean_grouped.jsonl`
-- Stage 6 reuses the original HSA-DPO training stack, but now reads Stage 5 `image` paths directly and uses adaptive example weights
+- Stage 6 reuses the original HSA-DPO training stack, now reads Stage 5 `image` paths directly, and by default applies `severity_weight` inside the DPO rejected term as the paper-style adaptive objective
 
 Current status:
 
@@ -203,7 +211,8 @@ Current status:
 ### Key Parameters
 
 - `use_chosen_score`: Whether to use chosen scores in DPO loss (default: False)
-- `use_rejected_score`: Whether to use rejected scores in DPO loss (default: False in the Stage 6 wrapper so adaptive weighting is not double-counted)
+- `use_rejected_score`: Whether to use rejected scores in DPO loss (default: True in the Stage 6 wrapper so `severity_weight` enters the inner adaptive DPO objective)
+- `use_adaptive_example_weight`: Whether to also apply outer example weighting after the inner DPO loss (default: False; enable only for an intentional stronger variant)
 - `beta`: Temperature parameter for DPO loss (default: 0.1)
 - `num_train_epochs`: Number of training epochs (default: 2)
 - `per_device_train_batch_size`: Batch size per GPU (default: 8)
@@ -232,6 +241,151 @@ RUN_STAGE6=true MODEL_PATH=models/llava-v1.5-13b IMAGE_ROOT="$(pwd)" bash script
 pip install -U modelscope
 modelscope download --model xiaowenyi/HSA-DPO --local-dir ./checkpoints
 ```
+
+### Evaluation Suite
+
+The repo now has a project-owned evaluation layer under `fg_pipeline/eval/`.
+
+It supports two modes:
+
+- **Paper core**: benchmark comparison against the referenced paper
+- **General eval**: Stage 3-6 internal metrics plus any selected public benchmarks
+
+The intended 3-way comparison is:
+
+- base `LLaVA-1.5-13B`
+- your local improved model
+- the referenced paper’s reported numbers as a fixed overlay
+
+Judge-based metrics are in scope from v1. They require `OPENAI_API_KEY` plus `OPENAI_JUDGE_MODEL` or `--openai-judge-model`.
+
+### Model Manifest
+
+The evaluation runner expects a JSON manifest:
+
+```json
+[
+  {
+    "model_id": "llava15_base_13b",
+    "model_path": "models/llava-v1.5-13b",
+    "model_base": null,
+    "kind": "base",
+    "conv_mode": "vicuna_v1",
+    "temperature": 0.0,
+    "num_beams": 1,
+    "max_new_tokens": 512
+  },
+  {
+    "model_id": "ours_stage6_lora",
+    "model_path": "output/fghd/adaptive_dpo",
+    "model_base": "models/llava-v1.5-13b",
+    "kind": "lora",
+    "conv_mode": "vicuna_v1",
+    "temperature": 0.0,
+    "num_beams": 1,
+    "max_new_tokens": 512
+  }
+]
+```
+
+Supported model kinds:
+
+- `base`
+- `lora`
+- `merged`
+
+### Paper-Core Benchmarks
+
+The paper-core wrapper defaults to:
+
+- `mhalubench`
+- `mfhallubench`
+- `object_halbench`
+- `amber`
+- `mmhal_bench`
+- `pope_adv`
+- `llava_bench_wild`
+- `hss`
+
+Current implementation shape:
+
+- `pope_adv`, `llava_bench_wild`, `mmhal_bench`, `hss` are working project-owned adapters
+- `object_halbench` and `amber` expect normalized local benchmark assets and emit comparability notes when they are not using official evaluators
+- `mhalubench` and `mfhallubench` are detection-side adapters that expect prepared prediction/annotation files for the Stage 3 detector
+
+### Dataset Prerequisites
+
+Benchmark assets are not bundled in this repo. Prepare them separately.
+
+Typical required assets:
+
+- `POPE Adv.`: question file plus image directory
+- `LLaVA-Bench-in-the-Wild`: `questions.jsonl`, `context.jsonl`, images, optional reference answers
+- `MMHal-Bench`: question file plus images
+- `Object HalBench`: normalized `questions.jsonl`, `annotations.jsonl`, images
+- `AMBER`: normalized generative split plus images
+- `MHaluBench`, `MFHaluBench`: prepared prediction/annotation files for the Stage 3 detector
+
+If a dataset is missing:
+
+- the runner fails clearly by default
+- use `--skip-missing-datasets` to skip it and still render the report
+
+### Run Paper-Core Evaluation
+
+```bash
+MODEL_MANIFEST=path/to/models.eval.json \
+OPENAI_JUDGE_MODEL=gpt-4.1 \
+bash scripts/run_paper_eval.sh
+```
+
+Direct CLI form:
+
+```bash
+python -m fg_pipeline.eval.run_eval \
+  --run-name paper_core \
+  --models-json path/to/models.eval.json \
+  --benchmarks mhalubench,mfhallubench,object_halbench,amber,mmhal_bench,pope_adv,llava_bench_wild,hss \
+  --paper-core \
+  --openai-judge-model gpt-4.1
+```
+
+### Run General Evaluation
+
+```bash
+MODEL_MANIFEST=path/to/models.eval.json \
+OPENAI_JUDGE_MODEL=gpt-4.1 \
+bash scripts/run_general_eval.sh
+```
+
+The general runner summarizes:
+
+- Stage 3 detection/calibration outputs if `output/fghd/D_det*.jsonl` exists
+- Stage 4 rewrite outputs if `D_rewrite*.jsonl` exists
+- Stage 5 clean preference outputs if `D_pref_clean*.jsonl` exists
+- Stage 6 trainer state if available
+- any selected public benchmark subset
+
+### Output Layout
+
+```text
+output/eval/<run_name>/
+├── models/<model_id>/predictions/
+├── models/<model_id>/metrics/
+├── models/<model_id>/judges/
+└── comparison/
+    ├── paper_core.json
+    ├── paper_core.md
+    ├── general_eval.json
+    ├── general_eval.md
+    └── summary.csv
+```
+
+The reports explicitly separate:
+
+- paper reference values
+- locally reproduced values
+- local proxy values that are useful for research iteration but not yet strictly paper-comparable
 
 ### Run Inference
 

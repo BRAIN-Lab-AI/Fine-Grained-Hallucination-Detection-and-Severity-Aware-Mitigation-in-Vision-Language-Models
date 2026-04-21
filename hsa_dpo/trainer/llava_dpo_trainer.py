@@ -78,9 +78,6 @@ class LlavaDPOTrainer(BaseDPOTrainer):
         chosen_logits = sum(chosen_logits)/len_chosen
         rejected_logits = sum(rejected_logits)/len_chosen
         
-        # import pdb;
-        # pdb.set_trace()
-        print(chosen_scores, rejected_scores)
         return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_scores, rejected_scores)
 
     def get_batch_metrics(

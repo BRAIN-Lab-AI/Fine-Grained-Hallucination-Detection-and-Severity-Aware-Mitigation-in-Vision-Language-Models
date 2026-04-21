@@ -13,12 +13,14 @@ fi
 export DATA_PATH="${DATA_PATH:-${DEFAULT_DATA_PATH}}"
 export IMAGE_FOLDER="${IMAGE_FOLDER:-${REPO_ROOT}}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/output/fghd/adaptive_dpo}"
-export USE_REJECTED_SCORE="${USE_REJECTED_SCORE:-False}"
+export USE_REJECTED_SCORE="${USE_REJECTED_SCORE:-True}"
+export USE_ADAPTIVE_EXAMPLE_WEIGHT="${USE_ADAPTIVE_EXAMPLE_WEIGHT:-False}"
 
 echo "Reusing the original HSA-DPO training stack with:"
 echo "  DATA_PATH=${DATA_PATH}"
 echo "  IMAGE_FOLDER=${IMAGE_FOLDER}"
 echo "  OUTPUT_DIR=${OUTPUT_DIR}"
 echo "  USE_REJECTED_SCORE=${USE_REJECTED_SCORE}"
+echo "  USE_ADAPTIVE_EXAMPLE_WEIGHT=${USE_ADAPTIVE_EXAMPLE_WEIGHT}"
 
 bash "${REPO_ROOT}/hsa_dpo_train.sh"

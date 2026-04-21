@@ -28,3 +28,5 @@ Those fields match what `hsa_dpo/models/llava-v1_5/train_dpo.py` already expects
 Stage 6 adaptive extensions:
 - prefer the carried `image` field over reconstructing paths from `id`
 - consume `pair_confidence`, `severity_weight`, and `adaptive_weight` when present
+- use `severity_weight` as the default rejected-term weight inside the DPO logit
+- keep outer `adaptive_weight` reduction optional rather than implicit
