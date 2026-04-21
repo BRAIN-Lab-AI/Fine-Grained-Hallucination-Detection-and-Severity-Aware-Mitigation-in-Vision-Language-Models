@@ -179,6 +179,109 @@ This means the research pipeline is implemented at the repo level; remaining wor
 3. Run Stage 6 on a real 2-GPU machine for the paper-like configuration.
 4. Strengthen Stage 5 threshold selection with either a better verifier or a manually audited subset if you want stronger empirical guarantees.
 
+## Execution Guide
+
+Run from the repo root on the Linux GPU machine after the environment is bootstrapped and the base LLaVA model is available at `models/llava-v1.5-13b`.
+
+### Step-by-step Stage 3 -> Stage 6
+
+```bash
+cd /workspace/Fine-Grained-Hallucination-Detection-and-Severity-Aware-Mitigation-in-Vision-Language-Models
+source .venv/bin/activate
+```
+
+1. Stage 3 detect with the real `log_prob` scorer:
+
+```bash
+rm -rf output/fghd
+INPUT=hsa_dpo/data/hsa_dpo_detection.jsonl \
+SCORER=log_prob \
+MODEL_PATH=models/llava-v1.5-13b \
+IMAGE_ROOT="$(pwd)" \
+bash scripts/run_stage3_confidence.sh
+```
+
+2. Stage 3 calibration with temperature scaling + group-conditional thresholds:
+
+```bash
+INPUT=output/fghd/D_det.jsonl \
+OUTPUT_CALIBRATED=output/fghd/D_det_calibrated.jsonl \
+REPORT=output/fghd/D_det_calibration.json \
+bash scripts/run_stage3_calibrate.sh
+```
+
+3. Stage 4 grouped rewrite using the calibration report:
+
+```bash
+bash scripts/run_stage4_rewrite.sh \
+  output/fghd/D_det_calibrated.jsonl \
+  output/fghd/D_rewrite_grouped.jsonl \
+  llava \
+  --model-path models/llava-v1.5-13b \
+  --image-root "$(pwd)" \
+  --threshold-report output/fghd/D_det_calibration.json
+```
+
+4. Stage 5 `tau_c` selection with CRC / CV-CRC:
+
+```bash
+bash scripts/run_stage5_select_threshold.sh \
+  output/fghd/D_rewrite_grouped.jsonl \
+  output/fghd/D_tau_c_report_grouped.json \
+  heuristic \
+  --method cv_crc \
+  --alpha 0.10 \
+  --folds 5 \
+  --min-accepted 100
+```
+
+5. Stage 5 final verification / filtering:
+
+```bash
+bash scripts/run_stage5_verify.sh \
+  output/fghd/D_rewrite_grouped.jsonl \
+  output/fghd/D_pref_clean_grouped.jsonl \
+  heuristic \
+  --threshold-report output/fghd/D_tau_c_report_grouped.json
+```
+
+6. Stage 6 adaptive DPO training on a real 2-GPU machine:
+
+```bash
+DATA_PATH=output/fghd/D_pref_clean_grouped.jsonl \
+IMAGE_FOLDER="$(pwd)" \
+MODEL_PATH=models/llava-v1.5-13b \
+bash scripts/run_stage6_train.sh
+```
+
+### One-shot calibrated pipeline
+
+This reruns Stage 3 calibration, Stage 4 grouped rewrite, Stage 5 `tau_c` selection, and Stage 5 verification automatically. It starts Stage 6 only if the machine has enough GPUs for the current configuration.
+
+```bash
+cd /workspace/Fine-Grained-Hallucination-Detection-and-Severity-Aware-Mitigation-in-Vision-Language-Models
+source .venv/bin/activate
+RUN_STAGE6=auto \
+MODEL_PATH=models/llava-v1.5-13b \
+IMAGE_ROOT="$(pwd)" \
+bash scripts/run_calibrated_pipeline.sh
+```
+
+If you are already on a suitable 2-GPU machine and want Stage 6 to be required instead of skipped automatically:
+
+```bash
+RUN_STAGE6=true \
+MODEL_PATH=models/llava-v1.5-13b \
+IMAGE_ROOT="$(pwd)" \
+bash scripts/run_calibrated_pipeline.sh
+```
+
+### Operational Notes
+
+- Stage 6 is expected to OOM on a `1x RTX 4080 SUPER 32 GB` box with the current paper-like configuration.
+- The current Stage 5 verifier is heuristic, so CRC / CV-CRC threshold guarantees are relative to that verifier.
+- The `template` Stage 4 backend remains smoke-only; use `llava` for real pipeline runs.
+
 ## Immediate Team Focus
 
 - Treat this local repo as the canonical development copy; Vast was only a run environment.
