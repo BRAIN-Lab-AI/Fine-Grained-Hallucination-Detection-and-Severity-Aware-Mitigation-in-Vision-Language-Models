@@ -15,8 +15,6 @@ from fg_pipeline.eval.utils import (
     mkdir,
     summarize_stage3,
     summarize_stage4,
-    summarize_stage5,
-    summarize_stage6,
 )
 
 
@@ -71,14 +69,10 @@ def _benchmark_spec(name: str, args: argparse.Namespace) -> BenchmarkSpec:
 def _stage_metrics() -> dict[str, dict]:
     discovered = discover_stage_paths()
     stage_metrics: dict[str, dict] = {}
-    if "stage3_det" in discovered:
-        stage_metrics["stage3"] = summarize_stage3(discovered["stage3_det"], discovered.get("stage3_report"))
-    if "stage4_rewrite" in discovered:
-        stage_metrics["stage4"] = summarize_stage4(discovered["stage4_rewrite"])
-    if "stage5_pref" in discovered:
-        stage_metrics["stage5"] = summarize_stage5(discovered["stage5_pref"], discovered.get("stage5_tau"))
-    if "stage6_dir" in discovered:
-        stage_metrics["stage6"] = summarize_stage6(discovered["stage6_dir"])
+    if "stage3_dir" in discovered:
+        stage_metrics["stage3"] = summarize_stage3(discovered["stage3_dir"])
+    if "stage4_dir" in discovered:
+        stage_metrics["stage4"] = summarize_stage4(discovered["stage4_dir"])
     return stage_metrics
 
 
@@ -90,9 +84,11 @@ def _run_hss(
     if not judge_model:
         raise RuntimeError("HSS requires --openai-judge-model")
     discovered = discover_stage_paths()
-    pref_path = discovered.get("stage5_pref")
+    pref_path = discovered.get("preference_pairs")
     if not pref_path:
-        raise FileNotFoundError("HSS requires output/fghd/D_pref_clean*.jsonl")
+        raise FileNotFoundError(
+            "HSS requires a preference-pairs JSONL (e.g. hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl)"
+        )
     from fg_pipeline.io_utils import read_jsonl
 
     pref_rows = list(read_jsonl(pref_path))

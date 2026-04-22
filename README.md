@@ -36,10 +36,19 @@
 
 This repository contains the official implementation of the paper "Detecting and Mitigating Hallucination in Large Vision Language Models via Fine-Grained AI Feedback". For supplementary experiments and details, please refer to the [Appendix](asset/HSA_DPO_Appendix.pdf).
 
-This working copy now has two layers:
+This working copy has two layers:
 
 - the original `hsa_dpo/` package and training flow from the released paper
-- a lightweight `fg_pipeline/` extension layer for the new confidence-aware pipeline
+- an `fg_pipeline/` extension layer that hosts the new pipeline stages as they come online, along with shared utilities and the paper/general evaluation tooling
+
+Project status:
+
+- the project method has been redesigned around four stages: (1) critique detection / extraction, (2) critique-guided rewrite, (3) majority-vote preference validation, and (4) severity-aware DPO
+- Stage 1 is implemented under `fg_pipeline/stage1/`; the default backend (`ReleasedAnnotationBackend`) parses the released `hsa_dpo_detection.jsonl` supervision into a normalized `Stage1Record` without any model inference, and a `CritiqueDetectorBackend` protocol is exposed so a trained detector can be plugged in later
+- Stage 2 is implemented under `fg_pipeline/stage2/`; it consumes Stage 1 JSONL and emits one corrected rewrite per hallucinated record; the default `TemplateRewriteBackend` is smoke-only and deterministic; the intended research path is `LlavaRewriteBackend` using the vendored LLaVA-v1.5 stack
+- Stage 3 is implemented under `fg_pipeline/stage3/`; it runs 3 verification votes per rewrite, keeps pairs only when at least 2 approve, writes an audit JSONL, and exports trainer-compatible preference pairs for Stage 4; the default `HeuristicVerificationBackend` is deterministic and smoke-oriented
+- Stage 4 remains the released HSA-DPO trainer, now reachable either directly via `hsa_dpo_train.sh` or through `scripts/run_stage4_train.sh`, which feeds Stage 3 preference pairs into the unchanged trainer path
+- the earlier confidence-based Stage 3-5 implementation remains fully removed and the new design does not reintroduce any confidence / calibration / threshold logic
 
 Design rule for this project:
 
@@ -172,19 +181,59 @@ bash hsa_dpo_train.sh
 
 ## Project Extension Pipeline
 
-The new project work lives under `fg_pipeline/` and reuses the original HSA-DPO code.
+The project method is being rebuilt around four stages: (1) critique detection / extraction, (2) critique-guided rewrite, (3) majority-vote preference validation, (4) severity-aware DPO. The earlier confidence-based approach (confidence scoring, calibration, thresholding, and CRC / CV-CRC selection) remains removed and is not part of the new design.
 
-Current stage launchers:
+What currently lives under `fg_pipeline/`:
+
+- `fg_pipeline/stage1/` — Stage 1 critique detection / extraction (parser, backend seam, CLI)
+- `fg_pipeline/stage2/` — Stage 2 critique-guided rewrite (prompt template, smoke backend, LLaVA backend seam, CLI)
+- `fg_pipeline/stage3/` — Stage 3 majority-vote verification (vote schema, heuristic backend, CLI)
+- `fg_pipeline/io_utils.py`, `fg_pipeline/paths.py`, `fg_pipeline/schemas.py` — shared utilities
+- `fg_pipeline/eval/` — paper-core and general evaluation tooling (benchmarks, judges, reporting)
+- `fg_pipeline/data/` — curated data fixtures (Stage 1 supervision mirror, smoke fixture, paper reference tables)
+
+Stage 1 launcher:
 
 ```bash
-bash scripts/run_stage3_confidence.sh
-bash scripts/run_stage3_calibrate.sh
-bash scripts/run_stage4_rewrite.sh
-bash scripts/run_stage5_select_threshold.sh
-bash scripts/run_stage5_verify.sh
-bash scripts/run_calibrated_pipeline.sh
-bash scripts/run_stage6_train.sh
+bash scripts/run_stage1_critiques.sh
+# or:
+python -m fg_pipeline.stage1.run_stage1 --help
 ```
+
+Stage 1 is CPU-friendly and does not require model inference. Output goes to `output/fghd/stage1/detection_critiques.jsonl` with a compact `stats.json` alongside.
+
+In the released Stage 1 source rows, the sentence after `Description to Assess:`
+is the assessed candidate response. The normalized Stage 1 output therefore
+stores that sentence in `response_text`, while the raw GPT annotation payload
+is preserved in `metadata.raw_annotation_text`.
+
+Stage 2 launcher:
+
+```bash
+bash scripts/run_stage2_rewrites.sh
+# or:
+python -m fg_pipeline.stage2.run_stage2 --help
+```
+
+Stage 2 skips non-hallucinated Stage 1 rows and writes one rewrite per
+hallucinated row to `output/fghd/stage2/rewrites.jsonl`.
+
+Stage 3 launcher:
+
+```bash
+bash scripts/run_stage3_validate.sh
+# or:
+python -m fg_pipeline.stage3.run_stage3 --help
+```
+
+Stage 3 consumes Stage 2 rewrites, runs three verification votes per row, keeps
+only pairs with at least 2 approvals, writes an audit JSONL to
+`output/fghd/stage3/vote_records.jsonl`, and writes Stage 4-compatible
+preference pairs to `output/fghd/stage3/preference_pairs.jsonl`.
+
+Current limitation: the released detection data does not expose the original
+user prompt separately, so the `question` field passed through Stages 1-3 may
+mirror the assessed candidate sentence rather than an upstream prompt.
 
 Evaluation launchers:
 
@@ -194,25 +243,37 @@ bash scripts/run_general_eval.sh
 python -m fg_pipeline.eval.run_eval --help
 ```
 
-What these stages do today:
+### Training (Stage 4 — severity-aware DPO)
 
-- Stage 3 runs confidence-aware detection, then calibrates the stored severity log-probs into `D_det_calibrated.jsonl` and a group-conditional threshold report
-- Stage 4 rewrites with either a smoke-only `template` backend or the real `llava` backend; it can use either a global `tau` or the calibrated threshold report
-- Stage 5 selects `tau_c` with CRC / CV-CRC and then verifies pairs into `D_pref_clean_grouped.jsonl`
-- Stage 6 reuses the original HSA-DPO training stack, now reads Stage 5 `image` paths directly, and by default applies `severity_weight` inside the DPO rejected term as the paper-style adaptive objective
+Stage 4 keeps the released HSA-DPO trainer unchanged:
+`hsa_dpo_train.sh` → `hsa_dpo/models/llava-v1_5/train_dpo.py` →
+`hsa_dpo.trainer.LlavaDPOTrainer`.
 
-Current status:
+For the redesigned Stage 1-4 pipeline, use:
 
-- Stage 3-6 are implemented at the repo level
-- the recommended end-to-end entrypoint is `bash scripts/run_calibrated_pipeline.sh`
-- the current Stage 5 verifier is heuristic, so CRC / CV-CRC guarantees are relative to that verifier rather than absolute ground truth
-- the paper-like Stage 6 configuration should be run on a real 2-GPU box; the current 1x 32 GB setup is expected to OOM
+```bash
+bash scripts/run_stage4_train.sh
+```
+
+This wrapper points `DATA_PATH` at
+`output/fghd/stage3/preference_pairs.jsonl`, sets `OUTPUT_DIR` to
+`output/fghd/stage4_llava`, and then delegates to `hsa_dpo_train.sh`.
+
+For a baseline-paper reproduction run, keep using the released preference file
+directly:
+
+```bash
+DATA_PATH=hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl \
+IMAGE_FOLDER=hsa_dpo/data/images \
+MODEL_PATH=models/llava-v1.5-13b \
+OUTPUT_DIR=output/hsa_dpo_llava \
+bash hsa_dpo_train.sh
+```
 
 ### Key Parameters
 
 - `use_chosen_score`: Whether to use chosen scores in DPO loss (default: False)
-- `use_rejected_score`: Whether to use rejected scores in DPO loss (default: True in the Stage 6 wrapper so `severity_weight` enters the inner adaptive DPO objective)
-- `use_adaptive_example_weight`: Whether to also apply outer example weighting after the inner DPO loss (default: False; enable only for an intentional stronger variant)
+- `use_rejected_score`: Whether to use rejected scores in DPO loss (default: True — reproduces the HSA-DPO severity-weighted rejected term)
 - `beta`: Temperature parameter for DPO loss (default: 0.1)
 - `num_train_epochs`: Number of training epochs (default: 2)
 - `per_device_train_batch_size`: Batch size per GPU (default: 8)
@@ -225,12 +286,6 @@ The script supports multi-GPU training with DeepSpeed. Adjust `NUM_GPUS` in the 
 ```bash
 NUM_GPUS=2  # Use 2 GPUs
 bash hsa_dpo_train.sh
-```
-
-For the calibrated extension pipeline on a suitable multi-GPU machine:
-
-```bash
-RUN_STAGE6=true MODEL_PATH=models/llava-v1.5-13b IMAGE_ROOT="$(pwd)" bash scripts/run_calibrated_pipeline.sh
 ```
 
 ## Evaluation
@@ -249,7 +304,7 @@ The repo now has a project-owned evaluation layer under `fg_pipeline/eval/`.
 It supports two modes:
 
 - **Paper core**: benchmark comparison against the referenced paper
-- **General eval**: Stage 3-6 internal metrics plus any selected public benchmarks
+- **General eval**: Stage 4 trainer state (when available) plus any selected public benchmarks
 
 The intended 3-way comparison is:
 
@@ -276,8 +331,8 @@ The evaluation runner expects a JSON manifest:
     "max_new_tokens": 512
   },
   {
-    "model_id": "ours_stage6_lora",
-    "model_path": "output/fghd/adaptive_dpo",
+    "model_id": "ours_stage4_lora",
+    "model_path": "output/fghd/stage4_llava",
     "model_base": "models/llava-v1.5-13b",
     "kind": "lora",
     "conv_mode": "vicuna_v1",
@@ -311,7 +366,7 @@ Current implementation shape:
 
 - `pope_adv`, `llava_bench_wild`, `mmhal_bench`, `hss` are working project-owned adapters
 - `object_halbench` and `amber` expect normalized local benchmark assets and emit comparability notes when they are not using official evaluators
-- `mhalubench` and `mfhallubench` are detection-side adapters that expect prepared prediction/annotation files for the Stage 3 detector
+- `mhalubench` and `mfhallubench` are detection-side adapters that expect prepared prediction/annotation files for the Stage 1 detector
 
 ### Dataset Prerequisites
 
@@ -324,7 +379,7 @@ Typical required assets:
 - `MMHal-Bench`: question file plus images
 - `Object HalBench`: normalized `questions.jsonl`, `annotations.jsonl`, images
 - `AMBER`: normalized generative split plus images
-- `MHaluBench`, `MFHaluBench`: prepared prediction/annotation files for the Stage 3 detector
+- `MHaluBench`, `MFHaluBench`: prepared prediction/annotation files for the Stage 1 detector
 
 If a dataset is missing:
 
@@ -360,10 +415,8 @@ bash scripts/run_general_eval.sh
 
 The general runner summarizes:
 
-- Stage 3 detection/calibration outputs if `output/fghd/D_det*.jsonl` exists
-- Stage 4 rewrite outputs if `D_rewrite*.jsonl` exists
-- Stage 5 clean preference outputs if `D_pref_clean*.jsonl` exists
-- Stage 6 trainer state if available
+- Stage 3 validation stats if available
+- Stage 4 trainer state if available (under `output/fghd/stage4_llava/` or `output/hsa_dpo_llava/`)
 - any selected public benchmark subset
 
 ### Output Layout

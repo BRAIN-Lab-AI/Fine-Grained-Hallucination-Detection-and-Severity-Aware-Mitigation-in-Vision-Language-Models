@@ -167,49 +167,67 @@ The training script already points to:
 
 - `MODEL_PATH="./models/llava-v1.5-13b"`
 
-## 7. Step 6: Verify Repo Paths Before Running The Pipeline
+## 7. Step 6: Verify Repo Paths Before Running Training
 
-This repo now has two image/data paths that matter:
+The paths that matter for baseline Stage 4 training:
 
-- Stage 3 detection input: `./hsa_dpo/data/hsa_dpo_detection.jsonl`
-- Visual Genome images for Stages 3-5: `./vg/images`
+- preference dataset: `./hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl`
+- training image folder: `./hsa_dpo/data/images`
 - model path: `./models/llava-v1.5-13b`
-- Stage 5 / Stage 6 preference output: `./output/fghd/D_pref_clean_grouped.jsonl`
+- training output: `./output/hsa_dpo_llava`
 
-Stage 6 now reads image paths from the Stage 5 `image` field directly, so the repo root is the correct `IMAGE_FOLDER` for the current pipeline.
-
-## 8. Step 7: Run The Calibrated Stage 3-5 Pipeline
-
-The recommended remote entrypoint is:
+Stage 1 (critique detection / extraction) runs off the supervision mirror
+at `fg_pipeline/data/hsa_dpo_detection.jsonl`. It is CPU-friendly and
+does not need the LLaVA base model:
 
 ```bash
-source .venv/bin/activate
-RUN_STAGE6=auto MODEL_PATH=models/llava-v1.5-13b IMAGE_ROOT="$(pwd)" bash scripts/run_calibrated_pipeline.sh
+bash scripts/run_stage1_critiques.sh
 ```
 
-What this does:
+Output: `output/fghd/stage1/detection_critiques.jsonl` (plus
+`stats.json`).
 
-- reruns Stage 3 calibration from `output/fghd/D_det.jsonl`
-- runs Stage 4 grouped rewrite with the calibrated threshold report
-- selects `tau_c` with CRC / CV-CRC
-- runs Stage 5 final verification
-- starts Stage 6 only when the machine has enough GPUs for the current setup
+If you are running the redesigned project pipeline rather than a baseline-only
+reproduction, the next steps are:
 
-If the instance has fewer GPUs than required for Stage 6, the script stops cleanly after Stage 5.
+```bash
+bash scripts/run_stage2_rewrites.sh
+bash scripts/run_stage3_validate.sh
+```
 
-## 9. Step 8: Start Stage 6 Only On A Suitable GPU Box
+Use the real rewrite backend on a GPU box with:
 
-If you are on a real 2-GPU box and already have `output/fghd/D_pref_clean_grouped.jsonl`, run:
+```bash
+BACKEND=llava MODEL_PATH=models/llava-v1.5-13b bash scripts/run_stage2_rewrites.sh
+```
+
+## 8. Step 7: Run Stage 4 Training (HSA-DPO Baseline)
+
+For the redesigned Stage 1-4 project pipeline, run Stage 4 through the wrapper
+after Stage 3:
 
 ```bash
 source .venv/bin/activate
-DATA_PATH=output/fghd/D_pref_clean_grouped.jsonl \
-IMAGE_FOLDER="$(pwd)" \
+bash scripts/run_stage4_train.sh
+```
+
+This uses `output/fghd/stage3/preference_pairs.jsonl` as the training data and
+writes checkpoints under `output/fghd/stage4_llava`.
+
+For a baseline-only reproduction run, use the released preference data
+directly:
+
+```bash
+source .venv/bin/activate
+DATA_PATH=hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl \
+IMAGE_FOLDER=hsa_dpo/data/images \
 MODEL_PATH=models/llava-v1.5-13b \
-bash scripts/run_stage6_train.sh
+OUTPUT_DIR=output/hsa_dpo_llava \
+bash hsa_dpo_train.sh
 ```
 
-If the instance only has 1 GPU with 32 GB VRAM, the current Stage 6 configuration is expected to OOM. Use a larger box rather than forcing the same training setup onto that machine.
+If the instance only has 1 GPU with 32 GB VRAM, this configuration is expected
+to OOM. Use a larger box rather than forcing the same setup onto that machine.
 
 For a smaller first validation run, use:
 
@@ -217,9 +235,7 @@ For a smaller first validation run, use:
 bash scripts/vastai/run_pilot_train.sh
 ```
 
-If you disconnect often, run inside `tmux`.
-
-Useful commands:
+If you disconnect often, run inside `tmux`:
 
 ```bash
 tmux new -s hsa-dpo
@@ -227,16 +243,20 @@ bash hsa_dpo_train.sh
 tmux attach -t hsa-dpo
 ```
 
-## 10. What You Should Add Next
+## 9. Evaluation
 
-If you want to make the Vast AI workflow cleaner, the next repo changes should be:
+On the remote instance, after the bootstrap script and model download:
 
-1. add a stronger Stage 5 verifier if you want `tau_c` selection to be grounded in something stronger than the current heuristic backend
-2. add a manually audited calibration subset if you want tighter paper-level claims around threshold selection
-3. add a small env file or shell file for per-instance overrides
-4. add checkpoint sync instructions for downloading results back to your laptop
+```bash
+source .venv/bin/activate
+bash scripts/run_paper_eval.sh
+bash scripts/run_general_eval.sh
+```
 
-## 11. Minimal Workflow Summary
+Both require `OPENAI_API_KEY` and `OPENAI_JUDGE_MODEL` for judge-based
+benchmarks (`llava_bench_wild`, `mmhal_bench`, `hss`).
+
+## 10. Minimal Workflow Summary
 
 ### On Windows
 
@@ -250,14 +270,21 @@ If you want to make the Vast AI workflow cleaner, the next repo changes should b
 
 1. keep `hsa_dpo_train.sh` as the baseline training entrypoint
 2. use `scripts/vastai/bootstrap.sh`
-3. use `scripts/run_calibrated_pipeline.sh` for the calibrated Stage 3-5 flow
-4. use this document as the project-specific checklist
-5. put machine-specific overrides in ignored `scripts/vastai/*.local.*` files rather than editing tracked setup docs for each instance
+3. use this document as the project-specific checklist
+4. put machine-specific overrides in ignored `scripts/vastai/*.local.*` files rather than editing tracked setup docs for each instance
 
 ### On the Vast instance
 
 1. clone repo
 2. run `bash scripts/vastai/bootstrap.sh`
 3. download LLaVA base model
-4. run `bash scripts/run_calibrated_pipeline.sh`
-5. run Stage 6 separately on a 2-GPU box if needed
+4. optionally run `bash scripts/run_stage1_critiques.sh` to refresh the
+   Stage 1 critique output (CPU-friendly; does not need the LLaVA model)
+5. optionally run `bash scripts/run_stage2_rewrites.sh` with
+   `BACKEND=llava MODEL_PATH=models/llava-v1.5-13b` for the real rewrite
+   backend (the default `template` backend works without a model)
+6. optionally run `bash scripts/run_stage3_validate.sh` to build clean
+   preference pairs from the Stage 2 rewrites
+7. run `bash scripts/run_stage4_train.sh` on a 2-GPU box for the redesigned
+   pipeline, or `bash hsa_dpo_train.sh` for a baseline-only reproduction
+8. optionally run `bash scripts/run_paper_eval.sh` / `bash scripts/run_general_eval.sh`

@@ -187,29 +187,24 @@ def resolve_existing(*candidates: str | Path | None) -> str | None:
 
 
 def discover_stage_paths() -> dict[str, str]:
-    output_root = repo_root() / "output" / "fghd"
+    """Locate optional artifacts the evaluator can summarize.
+
+    Discovers current project-pipeline artifacts when present.
+    """
+
+    output_root = repo_root() / "output"
     candidates = {
-        "stage3_det": [
-            output_root / "D_det_calibrated.jsonl",
-            output_root / "D_det.jsonl",
+        "stage3_dir": [
+            output_root / "fghd" / "stage3",
         ],
-        "stage3_report": [
-            output_root / "D_det_calibration.json",
+        "stage4_dir": [
+            output_root / "fghd" / "stage4_llava",
+            output_root / "hsa_dpo_llava",
+            output_root / "fghd" / "adaptive_dpo",
         ],
-        "stage4_rewrite": [
-            output_root / "D_rewrite_grouped.jsonl",
-            output_root / "D_rewrite.jsonl",
-        ],
-        "stage5_pref": [
-            output_root / "D_pref_clean_grouped.jsonl",
-            output_root / "D_pref_clean.jsonl",
-        ],
-        "stage5_tau": [
-            output_root / "D_tau_c_report_grouped.json",
-            output_root / "D_tau_c_report.json",
-        ],
-        "stage6_dir": [
-            output_root / "adaptive_dpo",
+        "preference_pairs": [
+            output_root / "fghd" / "stage3" / "preference_pairs.jsonl",
+            repo_root() / "hsa_dpo" / "data" / "hsa_dpo_preference_llava1dot5.jsonl",
         ],
     }
     discovered: dict[str, str] = {}
@@ -220,124 +215,34 @@ def discover_stage_paths() -> dict[str, str]:
     return discovered
 
 
-def summarize_stage3(path: str | Path, calibration_report: str | Path | None = None) -> dict[str, Any]:
-    rows = list(read_jsonl(path))
-    total_rows = len(rows)
-    signals = [signal for row in rows for signal in row.get("signals", [])]
-    real_signals = [
-        signal
-        for signal in signals
-        if not (signal.get("metadata") or {}).get("is_placeholder")
-        and not (signal.get("metadata") or {}).get("error")
-    ]
-    labels = [0 if (row.get("raw_detection") or "").strip().upper() == "NO HALLUCINATION" else 1 for row in rows]
-    scores = [
-        max([float(signal.get("confidence", 0.0)) for signal in row.get("signals", [])], default=0.0)
-        for row in rows
-    ]
-    predictions = [1 if score > 0.5 else 0 for score in scores]
-    summary = binary_classification_metrics(labels, predictions, scores=scores)
-    per_type: dict[str, int] = {}
-    per_severity: dict[str, int] = {}
-    for signal in real_signals:
-        per_type[signal.get("hallucination_type") or "unknown"] = (
-            per_type.get(signal.get("hallucination_type") or "unknown", 0) + 1
-        )
-        per_severity[str(signal.get("severity"))] = per_severity.get(str(signal.get("severity")), 0) + 1
-    result: dict[str, Any] = {
-        "rows": total_rows,
-        "signals": len(signals),
-        "real_signals": len(real_signals),
-        "no_hallucination_rows": sum(1 for label in labels if label == 0),
-        "per_type": per_type,
-        "per_severity": per_severity,
-        "row_accuracy": summary["accuracy"],
-        "row_precision": summary["precision"],
-        "row_recall": summary["recall"],
-        "row_f1": summary["f1"],
-        "auroc": summary["auroc"],
-        "auprc": summary["auprc"],
-        "brier": summary["brier"],
-        "nll": summary["nll"],
-        "ece": summary["ece"],
-    }
-    if calibration_report and Path(calibration_report).exists():
-        report = load_json(calibration_report)
-        policy = report.get("group_threshold_policy", {})
-        result["threshold_policy"] = {
-            "global_threshold": policy.get("global_threshold"),
-            "group_count": len(policy.get("by_group", {})),
-            "low_support_groups": sum(
-                1
-                for value in (policy.get("by_group", {}) or {}).values()
-                if isinstance(value, Mapping) and value.get("insufficient_support")
-            ),
-        }
+def summarize_stage3(stage3_dir: str | Path) -> dict[str, Any]:
+    stage3_path = Path(stage3_dir)
+    stats_path = resolve_existing(stage3_path / "stats.json")
+    result: dict[str, Any] = {"stage3_dir": str(stage3_path)}
+    if not stats_path:
+        return result
+    payload = load_json(stats_path)
+    for key in (
+        "total_input_rows",
+        "vote_rows_processed",
+        "preference_pairs_emitted",
+        "dropped_rows",
+        "backend",
+        "vote_count",
+        "approvals_required",
+    ):
+        if key in payload:
+            result[key] = payload[key]
     return result
 
 
-def summarize_stage4(path: str | Path) -> dict[str, Any]:
-    rows = list(read_jsonl(path))
-    backend_counts: dict[str, int] = {}
-    filtered_counts: list[int] = []
-    type_counts: dict[str, int] = {}
-    generated = 0
-    skipped = 0
-    for row in rows:
-        metadata = row.get("metadata") or {}
-        backend = metadata.get("rewrite_backend", "unknown")
-        backend_counts[backend] = backend_counts.get(backend, 0) + 1
-        status = metadata.get("rewrite_status")
-        if status == "skipped_no_reliable_signals":
-            skipped += 1
-        else:
-            generated += 1
-        filtered = row.get("filtered_signals", []) or []
-        filtered_counts.append(len(filtered))
-        for signal in filtered:
-            key = signal.get("hallucination_type") or "unknown"
-            type_counts[key] = type_counts.get(key, 0) + 1
-    return {
-        "rows": len(rows),
-        "generated": generated,
-        "skipped": skipped,
-        "rewrite_backend_distribution": backend_counts,
-        "avg_filtered_signals": mean_or_none(filtered_counts),
-        "per_type_filtered_signals": type_counts,
-        "uses_group_threshold_policy": any(
-            (row.get("metadata") or {}).get("threshold_policy") == "group_conditional"
-            for row in rows
-        ),
-    }
-
-
-def summarize_stage5(pref_path: str | Path, tau_report: str | Path | None = None) -> dict[str, Any]:
-    rows = list(read_jsonl(pref_path))
-    pair_confidences = [float(row.get("pair_confidence", 0.0)) for row in rows]
-    severity_weights = [float(row.get("severity_weight", 0.0)) for row in rows]
-    adaptive_weights = [float(row.get("adaptive_weight", 0.0)) for row in rows]
-    summary = {
-        "kept_rows": len(rows),
-        "pair_confidence_mean": mean_or_none(pair_confidences),
-        "pair_confidence_min": min(pair_confidences) if pair_confidences else None,
-        "pair_confidence_max": max(pair_confidences) if pair_confidences else None,
-        "severity_weight_mean": mean_or_none(severity_weights),
-        "adaptive_weight_mean": mean_or_none(adaptive_weights),
-    }
-    if tau_report and Path(tau_report).exists():
-        report = load_json(tau_report)
-        summary["selected_tau_c"] = report.get("selected_tau_c")
-        summary["tau_c_method"] = report.get("method")
-    return summary
-
-
-def summarize_stage6(stage6_dir: str | Path) -> dict[str, Any]:
-    stage6_path = Path(stage6_dir)
+def summarize_stage4(stage4_dir: str | Path) -> dict[str, Any]:
+    stage4_path = Path(stage4_dir)
     trainer_state = resolve_existing(
-        stage6_path / "trainer_state.json",
-        *stage6_path.rglob("trainer_state.json"),
+        stage4_path / "trainer_state.json",
+        *stage4_path.rglob("trainer_state.json"),
     )
-    result: dict[str, Any] = {"stage6_dir": str(stage6_path)}
+    result: dict[str, Any] = {"stage4_dir": str(stage4_path)}
     if not trainer_state:
         return result
     payload = load_json(trainer_state)
@@ -348,16 +253,15 @@ def summarize_stage6(stage6_dir: str | Path) -> dict[str, Any]:
         result["final_train_loss"] = train_logs[-1].get("loss")
     if eval_logs:
         latest = eval_logs[-1]
-        for key in (
-            "eval_rewards/accuracies",
-            "eval_rewards/margins",
-            "eval_adaptive/weight_mean",
-            "eval_adaptive/pair_confidence_mean",
-            "eval_adaptive/severity_weight_mean",
-        ):
+        for key in ("eval_rewards/accuracies", "eval_rewards/margins"):
             if key in latest:
                 result[key] = latest[key]
     return result
+
+
+def summarize_stage6(stage6_dir: str | Path) -> dict[str, Any]:
+    """Backward-compatible alias for older callers."""
+    return summarize_stage4(stage6_dir)
 
 
 def getenv_openai_judge_model(default: str | None = None) -> str | None:

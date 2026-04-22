@@ -155,7 +155,7 @@ def render_paper_markdown(models: list[ModelSpec], rows: list[ComparisonRow], av
 def render_general_markdown(report: dict[str, Any]) -> str:
     sections = ["# General Evaluation"]
     stage_metrics = report.get("stage_metrics", {})
-    for stage_name in ("stage3", "stage4", "stage5", "stage6"):
+    for stage_name in ("stage3", "stage4"):
         sections.append(f"## {stage_name.upper()} Summary")
         payload = stage_metrics.get(stage_name) or {}
         if not payload:

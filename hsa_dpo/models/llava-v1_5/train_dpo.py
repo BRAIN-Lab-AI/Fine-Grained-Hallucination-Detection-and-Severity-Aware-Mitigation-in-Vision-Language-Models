@@ -7,6 +7,7 @@ import random
 import logging
 import argparse
 import sys
+from pathlib import Path
 import numpy as np
 from PIL import Image
 from argparse import Namespace
@@ -21,8 +22,7 @@ from transformers import TrainerCallback
 from transformers import HfArgumentParser, TrainingArguments
 from tqdm.auto import tqdm
 
-from fg_pipeline.adaptive_dpo import normalize_preference_item, resolve_image_path
-from fg_pipeline.adaptive_dpo.trainer_adaptive import AdaptiveLlavaDPOTrainer
+from hsa_dpo.trainer.llava_dpo_trainer import LlavaDPOTrainer
 from llava.model import *
 from llava.constants import IGNORE_INDEX
 from llava import conversation as conversation_lib
@@ -116,13 +116,7 @@ class ScriptArguments:
     beta: Optional[float] = field(default=0.5, metadata={"help": "the beta parameter for DPO loss"})
     use_chosen_score: Optional[bool] = field(default=False, metadata={"help": "whether to use chosen score in DPO loss"})
     use_rejected_score: Optional[bool] = field(default=True, metadata={"help": "whether to use rejected score in DPO loss"})
-    use_adaptive_example_weight: Optional[bool] = field(
-        default=False,
-        metadata={
-            "help": "whether to apply outer example weighting after the paper-style inner adaptive DPO objective"
-        },
-    )
-    
+
     # training parameters
     learning_rate: Optional[float] = field(default=5e-4, metadata={"help": "optimizer learning rate"})
     lr_scheduler_type: Optional[str] = field(default="cosine", metadata={"help": "the lr scheduler type"})
@@ -188,6 +182,30 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
+
+def _resolve_image_path(
+    image_value: Optional[str],
+    image_root: str,
+    fallback_id: Optional[object] = None,
+) -> Path:
+    root = Path(image_root)
+    candidates: List[Path] = []
+    if image_value:
+        image_path = Path(image_value)
+        if image_path.is_absolute():
+            candidates.append(image_path)
+        else:
+            candidates.append(root / image_path)
+            candidates.append(image_path)
+    if fallback_id not in (None, ""):
+        candidates.append(root / f"{fallback_id}.jpg")
+    if not candidates:
+        return root / "__missing_image__.jpg"
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
@@ -241,11 +259,10 @@ class LazySupervisedDataset(Dataset):
             unit="sample",
             disable=_tqdm_disabled(),
         ):
-            sample = normalize_preference_item(item)
-            image_id = sample.get("id", "")
-            question = sample.get("question", "")
-            chosen = sample.get("chosen", "")
-            rejected = sample.get("rejected", "")
+            image_id = item.get("id", "")
+            question = item.get("question", "")
+            chosen = item.get("chosen", "")
+            rejected = item.get("rejected", "")
 
             # Add image token to question
             question = "<image>\n" + question
@@ -254,7 +271,7 @@ class LazySupervisedDataset(Dataset):
             processed = {
                 "id": image_id,
                 "image_id": image_id,
-                "image": sample.get("image"),
+                "image": item.get("image"),
                 "chosen_conversations": [
                     {"from": "human", "value": question},
                     {"from": "gpt", "value": chosen},
@@ -263,15 +280,9 @@ class LazySupervisedDataset(Dataset):
                     {"from": "human", "value": question},
                     {"from": "gpt", "value": rejected},
                 ],
-                "chosen_score": sample.get("chosen_score", 1.0),
-                "rejected_score": sample.get("rejected_score", 1.0),
+                "chosen_score": float(item.get("chosen_score", 1.0)),
+                "rejected_score": float(item.get("rejected_score", 1.0)),
             }
-            if "pair_confidence" in sample:
-                processed["pair_confidence"] = sample["pair_confidence"]
-            if "severity_weight" in sample:
-                processed["severity_weight"] = sample["severity_weight"]
-            if "adaptive_weight" in sample:
-                processed["adaptive_weight"] = sample["adaptive_weight"]
             processed_data.append(processed)
         return processed_data
     
@@ -320,7 +331,7 @@ class LazySupervisedDataset(Dataset):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
 
-        image_file = resolve_image_path(
+        image_file = _resolve_image_path(
             sample.get("image"),
             self.data_args.image_folder or ".",
             fallback_id=sample.get("image_id"),
@@ -380,12 +391,6 @@ class LazySupervisedDataset(Dataset):
                 chosen_scores=sample["chosen_score"],
                 rejected_scores=sample["rejected_score"],
             )
-            if "pair_confidence" in sample:
-                data_dict["pair_confidences"] = sample["pair_confidence"]
-            if "severity_weight" in sample:
-                data_dict["severity_weights"] = sample["severity_weight"]
-            if "adaptive_weight" in sample:
-                data_dict["adaptive_weights"] = sample["adaptive_weight"]
 
         # Include the image
         data_dict['images'] = image
@@ -427,24 +432,9 @@ class DataCollatorForSupervisedDataset(object):
             reject_labels=reject_labels,
             chosen_attention_mask=chosen_input_ids.ne(self.tokenizer.pad_token_id),
             reject_attention_mask=reject_input_ids.ne(self.tokenizer.pad_token_id),
-            chosen_scores=torch.tensor(chosen_scores),  # 这里添加了chosen_score
-            rejected_scores=torch.tensor(rejected_scores),  # 这里添加了rejected_score
+            chosen_scores=torch.tensor(chosen_scores),
+            rejected_scores=torch.tensor(rejected_scores),
         )
-        if all("pair_confidences" in instance for instance in instances):
-            batch["pair_confidences"] = torch.tensor(
-                [instance["pair_confidences"] for instance in instances],
-                dtype=torch.float32,
-            )
-        if all("severity_weights" in instance for instance in instances):
-            batch["severity_weights"] = torch.tensor(
-                [instance["severity_weights"] for instance in instances],
-                dtype=torch.float32,
-            )
-        if all("adaptive_weights" in instance for instance in instances):
-            batch["adaptive_weights"] = torch.tensor(
-                [instance["adaptive_weights"] for instance in instances],
-                dtype=torch.float32,
-            )
 
         if 'images' in instances[0]:
             images = [instance['images'] for instance in instances]
@@ -819,14 +809,13 @@ def main():
 
     print("Train:", training_args)
     # initialize the DPO trainer
-    dpo_trainer = AdaptiveLlavaDPOTrainer(
+    dpo_trainer = LlavaDPOTrainer(
         model=llava_policy_model,
         ref_model=llava_ref_model,
         args=training_args,
         beta=script_args.beta,
         use_chosen_score=script_args.use_chosen_score,
         use_rejected_score=script_args.use_rejected_score,
-        use_adaptive_example_weight=script_args.use_adaptive_example_weight,
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_length=script_args.max_length,

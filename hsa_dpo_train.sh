@@ -22,7 +22,6 @@ EPOCH="${EPOCH:-2}"
 LEARNING_RATE="${LEARNING_RATE:-2e-6}"
 USE_CHOSEN_SCORE="${USE_CHOSEN_SCORE:-False}"
 USE_REJECTED_SCORE="${USE_REJECTED_SCORE:-True}"
-USE_ADAPTIVE_EXAMPLE_WEIGHT="${USE_ADAPTIVE_EXAMPLE_WEIGHT:-False}"
 
 # Project-local defaults. Override with env vars if needed.
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl}"
@@ -100,7 +99,6 @@ echo "Output directory: ${OUTPUT_DIR}"
 echo "Using ${NUM_GPUS} GPUs"
 echo "Chosen score weighting: ${USE_CHOSEN_SCORE}"
 echo "Rejected score weighting: ${USE_REJECTED_SCORE}"
-echo "Outer adaptive example weighting: ${USE_ADAPTIVE_EXAMPLE_WEIGHT}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -143,7 +141,6 @@ deepspeed --num_gpus="${NUM_GPUS}" "${ENTRY}" \
     --deepspeed "${DS_CONFIG}" \
     --beta 0.1 \
     --use_chosen_score "${USE_CHOSEN_SCORE}" \
-    --use_rejected_score "${USE_REJECTED_SCORE}" \
-    --use_adaptive_example_weight "${USE_ADAPTIVE_EXAMPLE_WEIGHT}"
+    --use_rejected_score "${USE_REJECTED_SCORE}"
 
 echo "Training completed!"

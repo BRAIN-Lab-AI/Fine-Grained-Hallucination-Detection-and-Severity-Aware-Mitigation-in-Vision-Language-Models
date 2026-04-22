@@ -27,7 +27,8 @@ wheels/
 
 # Data files and large local assets
 /hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl
-/hsa_dpo/data/images/
+/hsa_dpo/data/images/*
+!/hsa_dpo/data/images/.gitkeep
 /fg_pipeline/data/hsa_dpo_detection.jsonl
 /vg/
 /VLFeedback/
@@ -35,6 +36,7 @@ wheels/
 /checkpoints/
 /playground/data/
 *.tar.gz
+*.bundle
 
 # Model weights
 /models/
