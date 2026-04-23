@@ -21,9 +21,12 @@ Design rule:
 - `fg_pipeline/stage1/` — Stage 1 critique detection / extraction
   - `schemas.py` — `Stage1Record`, `CritiqueItem`, severity mapping
   - `parser.py` — permissive parser for the released annotation format
-  - `backends.py` — `CritiqueDetectorBackend` protocol plus the default
-    `ReleasedAnnotationBackend`
-  - `run_stage1.py` — CLI (`python -m fg_pipeline.stage1.run_stage1`)
+  - `prompts.py` — local detector prompt template
+  - `backends.py` — `CritiqueDetectorBackend` protocol plus
+    `ReleasedAnnotationBackend` and `LlavaDetectorBackend`
+  - `run_stage1.py` — parser / detector inference CLI
+  - `run_stage1_detector_dataset.py` — detector SFT data prep
+  - `run_stage1_export_benchmarks.py` — detector benchmark export
 - `fg_pipeline/stage2/` — Stage 2 critique-guided rewrite
   - `schemas.py` — `Stage2Record`
   - `prompts.py` — rewrite prompt template + `PROMPT_VERSION` constant
@@ -32,8 +35,9 @@ Design rule:
   - `run_stage2.py` — CLI (`python -m fg_pipeline.stage2.run_stage2`)
 - `fg_pipeline/stage3/` — Stage 3 majority-vote preference validation
   - `schemas.py` — `Stage3Record`, `VoteDecision`
-  - `backends.py` — `VerificationBackend` protocol plus the default
-    `HeuristicVerificationBackend`
+  - `prompts.py` — local judge prompt template
+  - `backends.py` — `VerificationBackend` protocol plus
+    `HeuristicVerificationBackend` and `QwenLlavaEnsembleBackend`
   - `run_stage3.py` — CLI (`python -m fg_pipeline.stage3.run_stage3`)
 - `fg_pipeline/io_utils.py` — JSONL read/write helpers
 - `fg_pipeline/paths.py` — extension-layer default paths (Stages 1-4)
@@ -45,7 +49,7 @@ Design rule:
 
 ## Running Stage 1
 
-Stage 1 is CPU-friendly and does not require model inference.
+Stage 1 is CPU-friendly by default and does not require model inference.
 
 ```bash
 bash scripts/run_stage1_critiques.sh
@@ -62,6 +66,14 @@ python -m fg_pipeline.stage1.run_stage1 \
 
 Flags: `--backend released_annotations` (default), `--limit N` (smoke runs),
 `--strict` (fail on malformed rows).
+
+Detector research helpers:
+
+```bash
+bash scripts/run_stage1_detector_dataset.sh
+bash scripts/run_stage1_detector_train.sh
+bash scripts/run_stage1_export_benchmarks.sh
+```
 
 Stage 1 output record (`Stage1Record`):
 
@@ -125,8 +137,9 @@ Stage 2 output, by design.
 Stage 3 consumes Stage 2 output and decides whether the rewrite is good enough
 to become a training pair.
 
-The default backend (`heuristic`) is deterministic and smoke-only. It is
-useful for local pipeline bring-up, but it is not the final research judge.
+The default backend (`heuristic`) is deterministic and smoke-only. The local
+research backend is `qwen_llava_ensemble`, which uses Qwen for votes 1 and 3
+and LLaVA for vote 2.
 
 ```bash
 bash scripts/run_stage3_validate.sh
@@ -142,8 +155,10 @@ python -m fg_pipeline.stage3.run_stage3 \
   --stats-out output/fghd/stage3/stats.json
 ```
 
-Flags: `--backend heuristic`, `--limit N` (smoke runs), `--strict`
-(fail on malformed Stage 2 rows or backend errors).
+Flags: `--backend heuristic|qwen_llava_ensemble`, `--limit N` (smoke runs),
+`--strict` (fail on malformed Stage 2 rows or backend errors),
+`--qwen-model-path`, `--llava-model-path`, `--llava-model-base`,
+`--image-root`.
 
 Stage 3 output:
 

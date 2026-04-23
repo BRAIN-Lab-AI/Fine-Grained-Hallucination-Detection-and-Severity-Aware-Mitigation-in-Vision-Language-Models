@@ -13,8 +13,7 @@ fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-output/eval}"
 RUN_NAME="${RUN_NAME:-general_eval}"
 MODEL_MANIFEST="${MODEL_MANIFEST:-models.eval.json}"
-BENCHMARKS="${BENCHMARKS:-pope_adv,llava_bench_wild}"
-OPENAI_JUDGE_MODEL="${OPENAI_JUDGE_MODEL:-${OPENAI_MODEL:-}}"
+BENCHMARKS="${BENCHMARKS:-object_halbench,amber,mmhal_bench,llava_bench_wild,hss}"
 
 if [ ! -f "${MODEL_MANIFEST}" ]; then
   echo "Missing MODEL_MANIFEST: ${MODEL_MANIFEST}" >&2
@@ -26,13 +25,10 @@ CMD=(
   --run-name "${RUN_NAME}"
   --models-json "${MODEL_MANIFEST}"
   --benchmarks "${BENCHMARKS}"
+  --supplemental
   --general
   --skip-missing-datasets
   --output-root "${OUTPUT_ROOT}"
 )
-
-if [ -n "${OPENAI_JUDGE_MODEL}" ]; then
-  CMD+=(--openai-judge-model "${OPENAI_JUDGE_MODEL}")
-fi
 
 "${CMD[@]}" "$@"

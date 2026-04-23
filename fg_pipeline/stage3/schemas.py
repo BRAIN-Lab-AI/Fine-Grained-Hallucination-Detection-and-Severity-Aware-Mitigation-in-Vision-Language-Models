@@ -12,6 +12,8 @@ class VoteDecision:
     criterion: str
     approved: bool
     reason: str
+    model_family: str | None = None
+    backend_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

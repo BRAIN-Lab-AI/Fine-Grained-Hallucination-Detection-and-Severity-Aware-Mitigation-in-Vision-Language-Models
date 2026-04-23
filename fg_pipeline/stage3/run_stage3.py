@@ -24,8 +24,8 @@ from fg_pipeline.schemas import PreferenceCleanRecord
 from fg_pipeline.stage3.backends import (
     APPROVALS_REQUIRED,
     VOTE_COUNT,
-    VOTE_POLICY_VERSION,
     VerificationError,
+    evaluate_votes,
     get_backend,
 )
 from fg_pipeline.stage3.schemas import Stage3Record
@@ -76,16 +76,60 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail on malformed Stage 2 rows or verification errors.",
     )
+    parser.add_argument(
+        "--qwen-model-path",
+        type=str,
+        default=None,
+        help="Local Qwen-VL-Chat path for the qwen_llava_ensemble backend.",
+    )
+    parser.add_argument(
+        "--llava-model-path",
+        type=str,
+        default=None,
+        help="Local LLaVA path for the qwen_llava_ensemble backend.",
+    )
+    parser.add_argument(
+        "--llava-model-base",
+        type=str,
+        default=None,
+        help="Base model path when the LLaVA judge path is a LoRA adapter.",
+    )
+    parser.add_argument(
+        "--llava-conv-mode",
+        type=str,
+        default="vicuna_v1",
+        help="Conversation template for the LLaVA judge backend.",
+    )
+    parser.add_argument(
+        "--image-root",
+        type=str,
+        default=".",
+        help="Root directory used to resolve relative image paths for local judges.",
+    )
+    parser.add_argument(
+        "--qwen-max-new-tokens",
+        type=int,
+        default=256,
+        help="Max tokens for each Qwen judge vote.",
+    )
+    parser.add_argument(
+        "--llava-max-new-tokens",
+        type=int,
+        default=256,
+        help="Max tokens for each LLaVA judge vote.",
+    )
     return parser
 
 
 class _Stats:
-    def __init__(self, backend_name: str) -> None:
+    def __init__(self, backend_name: str, *, policy_version: str, approval_families_required: tuple[str, ...]) -> None:
         self.total_input_rows = 0
         self.vote_rows_processed = 0
         self.preference_pairs_emitted = 0
         self.dropped_rows = 0
         self.backend = backend_name
+        self.vote_policy_version = policy_version
+        self.approval_families_required = list(approval_families_required)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +140,8 @@ class _Stats:
             "backend": self.backend,
             "vote_count": VOTE_COUNT,
             "approvals_required": APPROVALS_REQUIRED,
+            "vote_policy_version": self.vote_policy_version,
+            "approval_families_required": self.approval_families_required,
         }
 
 
@@ -131,7 +177,11 @@ def _process_rows(
     strict: bool,
     limit: int | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], _Stats]:
-    stats = _Stats(backend_name=backend.name)
+    stats = _Stats(
+        backend_name=backend.name,
+        policy_version=backend.policy_version,
+        approval_families_required=getattr(backend, "approval_families_required", ()),
+    )
     audit_rows: list[dict[str, Any]] = []
     preference_rows: list[dict[str, Any]] = []
 
@@ -151,7 +201,7 @@ def _process_rows(
                 votes.append(backend.vote(row, vote_index=vote_index, strict=strict))
 
         approvals = sum(1 for vote in votes if vote.approved)
-        passed_majority = approvals >= APPROVALS_REQUIRED
+        passed_majority, vote_policy = evaluate_votes(backend, votes)
         severity_score = _aggregate_severity(critiques)
 
         metadata: dict[str, Any] = {
@@ -159,13 +209,14 @@ def _process_rows(
             "backend": backend.name,
             "vote_count": VOTE_COUNT,
             "approvals_required": APPROVALS_REQUIRED,
-            "vote_policy_version": VOTE_POLICY_VERSION,
+            "vote_policy_version": backend.policy_version,
             "question_source": (
                 "stage1_assessed_sentence"
                 if row.get("question") == row.get("original_response")
                 else "upstream_question"
             ),
         }
+        metadata.update(vote_policy)
         if warnings:
             metadata["validation_warnings"] = warnings
 
@@ -209,6 +260,9 @@ def _process_rows(
                         "vote_count": VOTE_COUNT,
                         "approvals_required": APPROVALS_REQUIRED,
                         "response_severity_score": severity_score,
+                        "vote_policy_version": backend.policy_version,
+                        "approved_families": vote_policy.get("approved_families"),
+                        "approval_families_required": vote_policy.get("approval_families_required"),
                         "question_source": metadata["question_source"],
                     },
                 ).to_dict()
@@ -230,7 +284,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        backend = get_backend(args.backend)
+        backend = get_backend(
+            args.backend,
+            qwen_model_path=args.qwen_model_path,
+            llava_model_path=args.llava_model_path,
+            llava_model_base=args.llava_model_base,
+            llava_conv_mode=args.llava_conv_mode,
+            image_root=args.image_root,
+            qwen_max_new_tokens=args.qwen_max_new_tokens,
+            llava_max_new_tokens=args.llava_max_new_tokens,
+        )
     except ValueError as exc:
         print(f"Stage 3 backend error: {exc}", file=sys.stderr)
         return 2

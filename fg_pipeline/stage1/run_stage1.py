@@ -8,8 +8,8 @@ Usage::
         --stats-out output/fghd/stage1/stats.json
 
 The CLI writes a normalized Stage 1 JSONL plus a compact stats JSON. It never
-calls a model; it parses released supervision via
-:class:`ReleasedAnnotationBackend`.
+calls a hosted service. It can either parse released supervision via
+:class:`ReleasedAnnotationBackend` or run a local LLaVA detector backend.
 """
 
 from __future__ import annotations
@@ -70,6 +70,36 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail on malformed hallucinated rows instead of recording warnings.",
     )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Local model path used by llava_detector.",
+    )
+    parser.add_argument(
+        "--model-base",
+        type=str,
+        default=None,
+        help="Base model path when --model-path is a LoRA adapter.",
+    )
+    parser.add_argument(
+        "--conv-mode",
+        type=str,
+        default="vicuna_v1",
+        help="Conversation template for llava_detector.",
+    )
+    parser.add_argument(
+        "--image-root",
+        type=str,
+        default=".",
+        help="Root directory used to resolve relative image paths.",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=384,
+        help="Max tokens to generate for llava_detector annotations.",
+    )
     return parser
 
 
@@ -126,7 +156,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Stage 1 input not found: {args.input}", file=sys.stderr)
         return 2
 
-    backend = get_backend(args.backend)
+    try:
+        backend = get_backend(
+            args.backend,
+            model_path=args.model_path,
+            model_base=args.model_base,
+            conv_mode=args.conv_mode,
+            image_root=args.image_root,
+            max_new_tokens=args.max_new_tokens,
+        )
+    except ValueError as exc:
+        print(f"Stage 1 backend error: {exc}", file=sys.stderr)
+        return 2
 
     rows_iter = read_jsonl(args.input)
     ensure_parent_dir(args.output)

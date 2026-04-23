@@ -25,13 +25,15 @@ class EvalSchemasTests(unittest.TestCase):
             benchmark="pope_adv",
             metric="f1",
             direction="higher_better",
-            base_value=0.8,
+            baseline_value=0.8,
             our_value=0.9,
             paper_reference_value=0.85,
-            delta_vs_base=0.1,
-            relative_delta_vs_base=0.125,
+            delta_vs_baseline=0.1,
+            relative_delta_vs_baseline=0.125,
+            strictly_comparable=True,
             paper_row_name="HSA-DPO w/ LLaVA-1.5",
-            note=None,
+            baseline_row_name="LLaVA-1.5",
+            comparison_note=None,
         )
         payload = row.to_dict()
         self.assertEqual(payload["direction"], "higher_better")

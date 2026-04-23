@@ -179,44 +179,21 @@ def _strip_item_prefix(raw_item: str) -> str:
     return _NUM_PREFIX_RE.sub("", raw_item).strip()
 
 
-def parse_detection_row(
-    row: dict[str, Any],
+def parse_assessed_annotation(
     *,
+    row_id: Any,
+    image: Any,
+    assessed_text: str,
+    annotation_text: str,
+    source: str,
     strict: bool = False,
 ) -> ParseResult:
-    """Parse one released-annotation row into a Stage 1 record.
-
-    When ``strict=True`` any mismatch between ``Tags:`` and ``Scores:`` counts,
-    or unparseable malformed hallucinated rows, raise :class:`ParseError`
-    instead of being folded into ``metadata.parse_warnings``.
-    """
-
-    if not isinstance(row, dict):
-        raise ParseError(f"row must be a dict, got {type(row).__name__}")
+    """Parse one annotation payload against an assessed response string."""
 
     warnings: list[str] = []
-
-    row_id = row.get("id")
-    image = row.get("image")
-    conversations = row.get("conversations") or []
-
-    human_text = ""
-    gpt_text = ""
-    for turn in conversations:
-        if not isinstance(turn, dict):
-            continue
-        src = str(turn.get("from", "")).lower()
-        value = turn.get("value", "")
-        if src == "human" and not human_text:
-            human_text = value or ""
-        elif src == "gpt" and not gpt_text:
-            gpt_text = value or ""
-
-    assessed_text = extract_question(human_text)
-    annotation_text = (gpt_text or "").strip()
-
+    annotation_text = (annotation_text or "").strip()
     metadata: dict[str, Any] = {
-        "source": "released_annotations",
+        "source": source,
         "raw_annotation_text": annotation_text,
     }
 
@@ -338,3 +315,45 @@ def parse_detection_row(
         metadata=metadata,
     )
     return ParseResult(record=record, warnings=warnings)
+
+
+def parse_detection_row(
+    row: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> ParseResult:
+    """Parse one released-annotation row into a Stage 1 record.
+
+    When ``strict=True`` any mismatch between ``Tags:`` and ``Scores:`` counts,
+    or unparseable malformed hallucinated rows, raise :class:`ParseError`
+    instead of being folded into ``metadata.parse_warnings``.
+    """
+
+    if not isinstance(row, dict):
+        raise ParseError(f"row must be a dict, got {type(row).__name__}")
+
+    row_id = row.get("id")
+    image = row.get("image")
+    conversations = row.get("conversations") or []
+
+    human_text = ""
+    gpt_text = ""
+    for turn in conversations:
+        if not isinstance(turn, dict):
+            continue
+        src = str(turn.get("from", "")).lower()
+        value = turn.get("value", "")
+        if src == "human" and not human_text:
+            human_text = value or ""
+        elif src == "gpt" and not gpt_text:
+            gpt_text = value or ""
+
+    assessed_text = extract_question(human_text)
+    return parse_assessed_annotation(
+        row_id=row_id,
+        image=image,
+        assessed_text=assessed_text,
+        annotation_text=gpt_text,
+        source="released_annotations",
+        strict=strict,
+    )

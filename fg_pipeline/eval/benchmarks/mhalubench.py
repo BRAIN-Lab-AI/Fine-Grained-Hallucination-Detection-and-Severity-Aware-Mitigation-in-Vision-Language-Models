@@ -9,7 +9,7 @@ from fg_pipeline.eval.utils import binary_classification_metrics, default_datase
 class MHaluBenchBenchmark:
     name = "mhalubench"
     judge_required = False
-    requires_model = False
+    requires_model = True
 
     def build_spec(
         self,
@@ -54,7 +54,7 @@ class MHaluBenchBenchmark:
         segment = _collect("segment")
         metric_artifact = MetricArtifact(
             benchmark=self.name,
-            model_id="stage3_detector",
+            model_id=model.model_id if model is not None else "stage1_detector",
             metrics={
                 "claim_accuracy": claim["accuracy"],
                 "claim_precision": claim["precision"],
@@ -68,6 +68,7 @@ class MHaluBenchBenchmark:
             comparable_to_paper=True,
             comparison_note=None,
         )
-        metric_dir = mkdir(Path(run_root) / "models" / "stage3_detector" / "metrics")
+        model_id = metric_artifact.model_id
+        metric_dir = mkdir(Path(run_root) / "models" / model_id / "metrics")
         dump_json(metric_dir / f"{self.name}.json", metric_artifact.to_dict())
         return None, metric_artifact, None

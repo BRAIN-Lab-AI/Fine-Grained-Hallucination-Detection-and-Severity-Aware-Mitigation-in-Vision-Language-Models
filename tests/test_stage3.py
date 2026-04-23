@@ -12,10 +12,13 @@ from fg_pipeline.stage1.schemas import CritiqueItem
 from fg_pipeline.stage2.schemas import Stage2Record
 from fg_pipeline.stage3 import (
     APPROVALS_REQUIRED,
+    ENSEMBLE_VOTE_POLICY_VERSION,
     HeuristicVerificationBackend,
+    QwenLlavaEnsembleBackend,
     Stage3Record,
     VOTE_COUNT,
     VoteDecision,
+    evaluate_votes,
     get_backend,
 )
 from fg_pipeline.stage3.backends import VerificationError
@@ -178,9 +181,92 @@ class BackendRegistryTests(unittest.TestCase):
         backend = get_backend("heuristic")
         self.assertIsInstance(backend, HeuristicVerificationBackend)
 
+    def test_get_backend_ensemble_requires_model_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            get_backend("qwen_llava_ensemble")
+
     def test_unknown_backend_raises(self) -> None:
         with self.assertRaises(ValueError):
             get_backend("not_a_backend")
+
+
+class EnsembleBackendTests(unittest.TestCase):
+    class _FakeRuntime:
+        def __init__(self, responses: dict[str, str]) -> None:
+            self.responses = responses
+
+        def judge(self, record, criterion: str) -> str:
+            return self.responses[criterion]
+
+    def test_ensemble_vote_assigns_expected_families(self) -> None:
+        backend = QwenLlavaEnsembleBackend(
+            qwen_model_path="models/qwen",
+            llava_model_path="models/llava",
+            qwen_runtime=self._FakeRuntime(
+                {
+                    "hallucination_removal": '{"approved": true, "reason": "removed"}',
+                    "overall_preference": '{"approved": true, "reason": "better"}',
+                }
+            ),
+            llava_runtime=self._FakeRuntime(
+                {"content_preservation": '{"approved": true, "reason": "preserved"}'}
+            ),
+        )
+        record = _make_stage2_record().to_dict()
+        vote1 = backend.vote(record, vote_index=1)
+        vote2 = backend.vote(record, vote_index=2)
+        vote3 = backend.vote(record, vote_index=3)
+        self.assertEqual(vote1.model_family, "qwen")
+        self.assertEqual(vote2.model_family, "llava")
+        self.assertEqual(vote3.model_family, "qwen")
+
+    def test_cross_family_requirement_blocks_two_qwen_approvals(self) -> None:
+        backend = QwenLlavaEnsembleBackend(
+            qwen_model_path="models/qwen",
+            llava_model_path="models/llava",
+            qwen_runtime=self._FakeRuntime(
+                {
+                    "hallucination_removal": '{"approved": true, "reason": "removed"}',
+                    "overall_preference": '{"approved": true, "reason": "better"}',
+                }
+            ),
+            llava_runtime=self._FakeRuntime(
+                {"content_preservation": '{"approved": false, "reason": "not preserved"}'}
+            ),
+        )
+        votes = [
+            backend.vote(_make_stage2_record().to_dict(), vote_index=1),
+            backend.vote(_make_stage2_record().to_dict(), vote_index=2),
+            backend.vote(_make_stage2_record().to_dict(), vote_index=3),
+        ]
+        passed, meta = evaluate_votes(backend, votes)
+        self.assertFalse(passed)
+        self.assertFalse(meta["cross_family_approval_ok"])
+        self.assertEqual(meta["approved_families"], ["qwen"])
+
+    def test_cross_family_requirement_passes_with_qwen_and_llava(self) -> None:
+        backend = QwenLlavaEnsembleBackend(
+            qwen_model_path="models/qwen",
+            llava_model_path="models/llava",
+            qwen_runtime=self._FakeRuntime(
+                {
+                    "hallucination_removal": '{"approved": true, "reason": "removed"}',
+                    "overall_preference": '{"approved": false, "reason": "too weak"}',
+                }
+            ),
+            llava_runtime=self._FakeRuntime(
+                {"content_preservation": '{"approved": true, "reason": "preserved"}'}
+            ),
+        )
+        good = _make_stage2_record().to_dict()
+        audit_rows, pref_rows, stats = _process_rows(backend, [good], strict=False, limit=None)
+        self.assertEqual(len(audit_rows), 1)
+        self.assertEqual(len(pref_rows), 1)
+        self.assertEqual(stats.vote_policy_version, ENSEMBLE_VOTE_POLICY_VERSION)
+        self.assertEqual(stats.approval_families_required, ["qwen", "llava"])
+        self.assertTrue(audit_rows[0]["metadata"]["cross_family_approval_ok"])
+        self.assertEqual(audit_rows[0]["metadata"]["approved_families"], ["llava", "qwen"])
+        self.assertEqual(pref_rows[0]["metadata"]["approved_families"], ["llava", "qwen"])
 
 
 class CLISmokeTests(unittest.TestCase):

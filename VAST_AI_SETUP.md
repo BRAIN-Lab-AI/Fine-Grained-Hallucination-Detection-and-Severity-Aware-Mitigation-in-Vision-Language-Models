@@ -201,6 +201,14 @@ Use the real rewrite backend on a GPU box with:
 BACKEND=llava MODEL_PATH=models/llava-v1.5-13b bash scripts/run_stage2_rewrites.sh
 ```
 
+For the local research Stage 3 backend on a real GPU box:
+
+```bash
+QWEN_MODEL_PATH=models/Qwen-VL-Chat \
+LLAVA_MODEL_PATH=models/llava-v1.5-13b \
+bash scripts/run_stage3_validate.sh
+```
+
 ## 8. Step 7: Run Stage 4 Training (HSA-DPO Baseline)
 
 For the redesigned Stage 1-4 project pipeline, run Stage 4 through the wrapper
@@ -253,8 +261,10 @@ bash scripts/run_paper_eval.sh
 bash scripts/run_general_eval.sh
 ```
 
-Both require `OPENAI_API_KEY` and `OPENAI_JUDGE_MODEL` for judge-based
-benchmarks (`llava_bench_wild`, `mmhal_bench`, `hss`).
+`run_paper_eval.sh` is now the strict paper-comparison wrapper and is local
+only by default. `run_general_eval.sh` writes general runtime summaries plus a
+separate supplemental local-eval report. Proxy or judge-like benchmarks that
+are not yet paper-faithful are intentionally kept out of the strict paper table.
 
 ## 10. Minimal Workflow Summary
 
@@ -280,11 +290,16 @@ benchmarks (`llava_bench_wild`, `mmhal_bench`, `hss`).
 3. download LLaVA base model
 4. optionally run `bash scripts/run_stage1_critiques.sh` to refresh the
    Stage 1 critique output (CPU-friendly; does not need the LLaVA model)
+5. optionally run `bash scripts/run_stage1_detector_dataset.sh` and
+   `bash scripts/run_stage1_detector_train.sh` if you want a local Stage 1
+   detector model rather than parser-only extraction
 5. optionally run `bash scripts/run_stage2_rewrites.sh` with
    `BACKEND=llava MODEL_PATH=models/llava-v1.5-13b` for the real rewrite
    backend (the default `template` backend works without a model)
 6. optionally run `bash scripts/run_stage3_validate.sh` to build clean
-   preference pairs from the Stage 2 rewrites
+   preference pairs from the Stage 2 rewrites; if `QWEN_MODEL_PATH` and
+   `LLAVA_MODEL_PATH` are set, the launcher prefers the local Qwen+LLaVA
+   ensemble backend automatically
 7. run `bash scripts/run_stage4_train.sh` on a 2-GPU box for the redesigned
    pipeline, or `bash hsa_dpo_train.sh` for a baseline-only reproduction
 8. optionally run `bash scripts/run_paper_eval.sh` / `bash scripts/run_general_eval.sh`

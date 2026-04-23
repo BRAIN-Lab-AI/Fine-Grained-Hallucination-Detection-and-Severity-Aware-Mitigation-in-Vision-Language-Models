@@ -27,6 +27,7 @@ from fg_pipeline.schemas import PreferenceCleanRecord
 from fg_pipeline.stage1 import (
     CritiqueDetectorBackend,
     CritiqueItem,
+    LlavaDetectorBackend,
     ReleasedAnnotationBackend,
     Stage1Record,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "Stage1Record",
     "CritiqueItem",
     "CritiqueDetectorBackend",
+    "LlavaDetectorBackend",
     "ReleasedAnnotationBackend",
     "Stage2Record",
     "RewriteBackend",

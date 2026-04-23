@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fg_pipeline.eval.reporting import build_paper_comparison, render_general_markdown, render_paper_markdown
+from fg_pipeline.eval.reporting import (
+    build_paper_comparison,
+    render_general_markdown,
+    render_paper_markdown,
+    render_supplemental_markdown,
+)
 from fg_pipeline.eval.schemas import MetricArtifact, ModelSpec
 
 
@@ -48,12 +53,15 @@ class ReportingTests(unittest.TestCase):
             self.models,
         )
         self.assertEqual(len(rows), 1)
-        self.assertAlmostEqual(rows[0].delta_vs_base or 0.0, 4.0)
+        self.assertAlmostEqual(rows[0].delta_vs_baseline or 0.0, 4.0)
         self.assertAlmostEqual(rows[0].paper_reference_value or 0.0, 84.9)
+        self.assertTrue(rows[0].strictly_comparable)
 
     def test_markdown_renderers_handle_missing_values(self) -> None:
         paper = render_paper_markdown(self.models, [], {"pope_adv": {"status": "skipped", "note": "missing"}})
         self.assertIn("Benchmark Availability", paper)
+        supplemental = render_supplemental_markdown([], {"amber": {"status": "skipped", "note": "proxy"}})
+        self.assertIn("Supplemental Local Evaluation", supplemental)
         general = render_general_markdown({"stage_metrics": {}, "benchmarks": []})
         self.assertIn("General Evaluation", general)
 

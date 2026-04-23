@@ -13,11 +13,14 @@ plugged in later without changing the Stage 3 output schema.
 from fg_pipeline.stage3.schemas import Stage3Record, VoteDecision
 from fg_pipeline.stage3.backends import (
     HeuristicVerificationBackend,
+    QwenLlavaEnsembleBackend,
     VerificationBackend,
     VerificationError,
     VOTE_COUNT,
     APPROVALS_REQUIRED,
+    ENSEMBLE_VOTE_POLICY_VERSION,
     VOTE_POLICY_VERSION,
+    evaluate_votes,
     get_backend,
 )
 
@@ -27,8 +30,11 @@ __all__ = [
     "VerificationBackend",
     "VerificationError",
     "HeuristicVerificationBackend",
+    "QwenLlavaEnsembleBackend",
     "VOTE_COUNT",
     "APPROVALS_REQUIRED",
+    "ENSEMBLE_VOTE_POLICY_VERSION",
     "VOTE_POLICY_VERSION",
+    "evaluate_votes",
     "get_backend",
 ]

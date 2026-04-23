@@ -16,10 +16,13 @@ from fg_pipeline.stage1.schemas import (
 )
 from fg_pipeline.stage1.parser import (
     ParseResult,
+    parse_assessed_annotation,
     parse_detection_row,
 )
+from fg_pipeline.stage1.prompts import PROMPT_VERSION, build_detector_prompt
 from fg_pipeline.stage1.backends import (
     CritiqueDetectorBackend,
+    LlavaDetectorBackend,
     ReleasedAnnotationBackend,
     get_backend,
 )
@@ -29,8 +32,12 @@ __all__ = [
     "Stage1Record",
     "SEVERITY_LABEL_TO_SCORE",
     "ParseResult",
+    "parse_assessed_annotation",
     "parse_detection_row",
+    "PROMPT_VERSION",
+    "build_detector_prompt",
     "CritiqueDetectorBackend",
+    "LlavaDetectorBackend",
     "ReleasedAnnotationBackend",
     "get_backend",
 ]

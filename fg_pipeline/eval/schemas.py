@@ -92,13 +92,15 @@ class ComparisonRow:
     benchmark: str
     metric: str
     direction: Direction
-    base_value: float | None
+    baseline_value: float | None
     our_value: float | None
     paper_reference_value: float | None
-    delta_vs_base: float | None
-    relative_delta_vs_base: float | None
+    delta_vs_baseline: float | None
+    relative_delta_vs_baseline: float | None
+    strictly_comparable: bool
     paper_row_name: str | None
-    note: str | None = None
+    baseline_row_name: str | None = None
+    comparison_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

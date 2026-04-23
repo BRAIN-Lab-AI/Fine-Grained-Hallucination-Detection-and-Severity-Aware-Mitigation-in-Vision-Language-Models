@@ -20,8 +20,9 @@ For the full research method, see [README.md](README.md).
 - **Stage 1 is implemented** as `fg_pipeline/stage1/`. The default
   backend (`ReleasedAnnotationBackend`) parses the released
   `hsa_dpo_detection.jsonl` supervision into a normalized `Stage1Record`.
-  A `CritiqueDetectorBackend` protocol is exposed so a trained Stage 1
-  detector can be plugged in later without changing the output schema.
+  The local research path now also includes a `LlavaDetectorBackend`,
+  detector dataset-prep, and benchmark-export entrypoints without changing
+  the output schema.
 - **Stage 2 is implemented** as `fg_pipeline/stage2/`. It consumes Stage
   1 JSONL and emits one corrected rewrite per hallucinated record;
   non-hallucinated rows are skipped. The default
@@ -34,9 +35,10 @@ For the full research method, see [README.md](README.md).
   2 rewrites, runs 3 verification votes per row, keeps pairs only when
   at least 2 approve, writes a Stage 3 audit artifact, and exports
   trainer-compatible preference pairs. The default
-  `HeuristicVerificationBackend` is deterministic and smoke-oriented; a
-  backend seam is exposed so stronger judges can be added later without
-  changing the Stage 3 output schema.
+  `HeuristicVerificationBackend` is deterministic and smoke-oriented; the
+  local research backend is now `qwen_llava_ensemble`, which requires at
+  least one approved Qwen vote and one approved LLaVA vote in addition to
+  the usual 2-of-3 approval rule.
 - **Stage 4 keeps the released HSA-DPO baseline trainer.**
   `scripts/run_stage4_train.sh` now wraps `hsa_dpo_train.sh` so the new
   Stage 3 preference pairs can flow into the unchanged trainer path.
@@ -47,8 +49,9 @@ For the full research method, see [README.md](README.md).
   `<image_folder>/<id>.jpg`) is kept inline as a runtime fix.
 - **Vendored LLaVA-v1.5 compatibility fixes are preserved.** These are
   generic fixes, not tied to any removed approach.
-- **Evaluation tooling remains.** `fg_pipeline/eval/` still provides
-  paper-core and general evaluation.
+- **Evaluation tooling is now split.** `fg_pipeline/eval/` provides
+  strict paper comparison, supplemental local evaluation, and general
+  runtime reporting.
 
 ## Current Architecture
 
@@ -77,7 +80,9 @@ The repo has two layers.
 │   │   ├── schemas.py
 │   │   ├── parser.py
 │   │   ├── backends.py
-│   │   └── run_stage1.py                         ← CLI entrypoint
+│   │   ├── run_stage1.py                         ← parse / detector inference CLI
+│   │   ├── run_stage1_detector_dataset.py        ← detector SFT data prep
+│   │   └── run_stage1_export_benchmarks.py       ← detector benchmark export
 │   ├── stage2/                                   ← Stage 2 critique-guided rewrite
 │   │   ├── schemas.py
 │   │   ├── prompts.py
@@ -85,6 +90,7 @@ The repo has two layers.
 │   │   └── run_stage2.py                         ← CLI entrypoint
 │   ├── stage3/                                   ← Stage 3 majority-vote validation
 │   │   ├── schemas.py
+│   │   ├── prompts.py
 │   │   ├── backends.py
 │   │   └── run_stage3.py                         ← CLI entrypoint
 │   ├── data/
@@ -97,7 +103,10 @@ The repo has two layers.
 │   └── io_utils.py                               ← JSONL helpers
 │
 ├── scripts/
-│   ├── run_stage1_critiques.sh                   ← Stage 1 launcher
+│   ├── run_stage1_critiques.sh                   ← Stage 1 parser / inference launcher
+│   ├── run_stage1_detector_dataset.sh            ← Stage 1 detector SFT prep
+│   ├── run_stage1_detector_train.sh              ← Stage 1 detector train wrapper
+│   ├── run_stage1_export_benchmarks.sh           ← Stage 1 benchmark export
 │   ├── run_stage2_rewrites.sh                    ← Stage 2 launcher
 │   ├── run_stage3_validate.sh                    ← Stage 3 launcher
 │   ├── run_stage4_train.sh                       ← Stage 4 wrapper
@@ -130,11 +139,11 @@ The repo has two layers.
 ## Pipeline (current state)
 
 - Stage 1 — Critique detection / critique extraction
-  *(implemented; default backend parses released fine-grained supervision)*
+  *(implemented; released-annotation parser is default, LLaVA detector is the local research path)*
 - Stage 2 — Critique-guided rewrite
   *(implemented; template backend is smoke-only; LLaVA backend is the research path)*
 - Stage 3 — Majority-vote preference validation
-  *(implemented; heuristic backend is smoke-only and emits clean preference pairs)*
+  *(implemented; heuristic backend is smoke-only, Qwen+LLaVA ensemble is the local research path)*
 - Stage 4 — Severity-aware DPO
   *(implemented via `scripts/run_stage4_train.sh` -> `hsa_dpo_train.sh`)*
 
@@ -156,13 +165,11 @@ that sentence in `response_text`; the raw GPT supervision is preserved under
 
 ## What We Will Do Next
 
-1. Validate the LLaVA rewrite backend on a GPU instance (Stage 2 template
-   backend is smoke-only).
-2. Replace or augment the heuristic Stage 3 judge with a stronger LLM/VLM
-   verifier backend.
-3. Run the full Stage 1 -> Stage 4 pipeline on a suitable multi-GPU box,
+1. GPU-validate the Stage 1 detector path and Stage 2 rewrite path on Vast.
+2. Run the full Stage 1 -> Stage 4 pipeline on a suitable multi-GPU box,
    but gate Stage 4 on a quick inspection of the Stage 3 preference pairs.
-4. Reproduce the paper baseline separately with the released preference file.
+3. Reproduce the paper baseline separately with the released preference file.
+4. Keep strict paper comparison separate from supplemental local metrics.
 
 ## Execution Guide
 
@@ -185,6 +192,14 @@ python -m fg_pipeline.stage1.run_stage1 \
 
 Useful flags: `--backend released_annotations` (default), `--limit N`
 for smoke runs, `--strict` to fail on malformed hallucinated rows.
+
+Detector research path helpers:
+
+```bash
+bash scripts/run_stage1_detector_dataset.sh
+bash scripts/run_stage1_detector_train.sh
+bash scripts/run_stage1_export_benchmarks.sh
+```
 
 ### Stage 2 critique-guided rewrite (requires Stage 1 output)
 
@@ -237,8 +252,16 @@ python -m fg_pipeline.stage3.run_stage3 \
   --stats-out output/fghd/stage3/stats.json
 ```
 
-Useful flags: `--backend heuristic` (default), `--limit N` for smoke runs,
-`--strict` to fail on malformed Stage 2 rows.
+Useful flags: `--backend heuristic` (smoke default), `--limit N` for smoke
+runs, `--strict` to fail on malformed Stage 2 rows.
+
+For the local research backend:
+
+```bash
+QWEN_MODEL_PATH=models/Qwen-VL-Chat \
+LLAVA_MODEL_PATH=models/llava-v1.5-13b \
+bash scripts/run_stage3_validate.sh
+```
 
 Stage 3 writes:
 
@@ -253,8 +276,9 @@ Before launching Stage 4 on a long run, inspect:
 - `output/fghd/stage3/stats.json`
 - a small sample of `output/fghd/stage3/preference_pairs.jsonl`
 
-The current default Stage 3 backend is heuristic and smoke-oriented. It is
-useful for pipeline bring-up, but it is not yet the final research judge.
+The current smoke default is heuristic. The local research path is the
+`qwen_llava_ensemble` backend, which enforces both 2-of-3 approval and
+cross-family approval coverage.
 
 ### Stage 4 training (severity-aware DPO)
 
@@ -301,11 +325,14 @@ Current data limitation:
 
 ## Evaluation Guide
 
-The repo has two evaluation entrypoints.
+The repo has three evaluation layers.
 
 - `bash scripts/run_paper_eval.sh`
-  Runs the paper-core wrapper and writes
+  Runs the strict paper-comparison wrapper and writes
   `output/eval/<run_name>/comparison/paper_core.{json,md}` plus `summary.csv`.
+- `output/eval/<run_name>/comparison/supplemental_eval.{json,md}`
+  Captures local or proxy rows that are intentionally excluded from the
+  strict paper delta table.
 - `bash scripts/run_general_eval.sh`
   Summarizes Stage 3 validation stats, Stage 4 trainer state (when present),
   and any selected public benchmark subset.
@@ -316,13 +343,15 @@ Evaluation is manifest-driven. The runner expects:
 - one local improved model row
 - `model_base` when the model kind is `lora`
 
-Judge-based metrics currently include:
+Strict paper comparison is local-only. It validates the manifest and requires:
 
-- `llava_bench_wild`
-- `mmhal_bench`
-- `hss`
+- `temperature = 0.0`
+- `num_beams = 1`
+- `conv_mode = vicuna_v1`
+- one shared `max_new_tokens` value across the manifest
 
-These require `OPENAI_API_KEY` and `OPENAI_JUDGE_MODEL`.
+Supplemental rows are reported separately when a benchmark is proxy-only,
+uses an unmatched local evaluator, or lacks a paper reference row.
 
 ## Immediate Team Focus
 

@@ -91,7 +91,44 @@ class PopeSmokeTests(unittest.TestCase):
             comparison = tmp / "output" / "smoke" / "comparison"
             self.assertTrue((comparison / "paper_core.json").exists())
             self.assertTrue((comparison / "paper_core.md").exists())
+            self.assertTrue((comparison / "supplemental_eval.json").exists())
             self.assertTrue((comparison / "summary.csv").exists())
+
+    def test_strict_paper_eval_rejects_unfair_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest = tmp / "models.json"
+            manifest.write_text(
+                json.dumps(
+                    [
+                        {
+                            "model_id": "base",
+                            "model_path": "models/base",
+                            "model_base": None,
+                            "kind": "base",
+                            "conv_mode": "vicuna_v1",
+                            "temperature": 0.2,
+                            "num_beams": 1,
+                            "max_new_tokens": 32,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                "run_eval.py",
+                "--run-name",
+                "strict",
+                "--models-json",
+                str(manifest),
+                "--paper-core",
+                "--output-root",
+                str(tmp / "output"),
+            ]
+            with patch("sys.argv", argv):
+                with self.assertRaises(SystemExit) as exc:
+                    main()
+            self.assertIn("temperature=0.0", str(exc.exception))
 
 
 if __name__ == "__main__":
