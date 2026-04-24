@@ -57,6 +57,12 @@ def _require_existing_path(path_value: str | None, *, context: str) -> None:
     raise FileNotFoundError(f"{context} path not found: {path_value}")
 
 
+def _optional_int(value: Any, default: int | None = None) -> int | None:
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
 @runtime_checkable
 class VerificationBackend(Protocol):
     """Minimal Stage-3-facing contract for any verification backend."""
@@ -463,7 +469,7 @@ class _GeminiJudgeRuntime:
         api_key: str | None = None,
         model: str = "gemini-2.5-flash-lite",
         image_root: str | None = None,
-        max_output_tokens: int = 64,
+        max_output_tokens: int | None = None,
         temperature: float = 0.0,
         timeout_seconds: int = 60,
         retries: int = 3,
@@ -509,7 +515,6 @@ class _GeminiJudgeRuntime:
             "contents": [{"parts": parts}],
             "generationConfig": {
                 "temperature": self._temperature,
-                "maxOutputTokens": self._max_output_tokens,
                 "responseMimeType": "application/json",
                 "responseSchema": {
                     "type": "object",
@@ -522,6 +527,8 @@ class _GeminiJudgeRuntime:
                 },
             },
         }
+        if self._max_output_tokens is not None:
+            payload["generationConfig"]["maxOutputTokens"] = self._max_output_tokens
         response = self._request(payload)
         try:
             return str(response["candidates"][0]["content"]["parts"][0]["text"]).strip()
@@ -570,7 +577,7 @@ class _OpenAIJudgeRuntime:
         api_key: str | None = None,
         model: str = "gpt-4o-mini",
         image_root: str | None = None,
-        max_output_tokens: int = 128,
+        max_output_tokens: int | None = None,
         temperature: float = 0.0,
         timeout_seconds: int = 60,
         retries: int = 3,
@@ -617,9 +624,10 @@ class _OpenAIJudgeRuntime:
             "model": self._model,
             "messages": [{"role": "user", "content": content}],
             "temperature": self._temperature,
-            "max_tokens": self._max_output_tokens,
             "response_format": {"type": "json_object"},
         }
+        if self._max_output_tokens is not None:
+            payload["max_tokens"] = self._max_output_tokens
         response = self._request(payload)
         try:
             return str(response["choices"][0]["message"]["content"]).strip()
@@ -679,7 +687,7 @@ class GeminiLlavaTwoVoteBackend:
         llava_conv_mode: str = "vicuna_v1",
         image_root: str | None = None,
         gemini_model: str = "gemini-2.5-flash-lite",
-        gemini_max_output_tokens: int = 64,
+        gemini_max_output_tokens: int | None = None,
         llava_max_new_tokens: int = 64,
         gemini_temperature: float = 0.0,
         llava_temperature: float = 0.0,
@@ -760,7 +768,7 @@ class GeminiTwoVoteBackend:
         *,
         image_root: str | None = None,
         gemini_model: str = "gemini-2.5-flash-lite",
-        gemini_max_output_tokens: int = 64,
+        gemini_max_output_tokens: int | None = None,
         gemini_temperature: float = 0.0,
         gemini_runtime: Any | None = None,
     ) -> None:
@@ -823,10 +831,10 @@ class GeminiOpenAITwoVoteBackend:
         *,
         image_root: str | None = None,
         gemini_model: str = "gemini-2.5-flash-lite",
-        gemini_max_output_tokens: int = 128,
+        gemini_max_output_tokens: int | None = None,
         gemini_temperature: float = 0.0,
         openai_model: str = "gpt-4o-mini",
-        openai_max_output_tokens: int = 128,
+        openai_max_output_tokens: int | None = None,
         openai_temperature: float = 0.0,
         gemini_runtime: Any | None = None,
         openai_runtime: Any | None = None,
@@ -906,7 +914,7 @@ def get_backend(name: str, **kwargs: Any) -> VerificationBackend:
             llava_conv_mode=kwargs.get("llava_conv_mode", "vicuna_v1"),
             image_root=kwargs.get("image_root"),
             gemini_model=kwargs.get("gemini_model", "gemini-2.5-flash-lite"),
-            gemini_max_output_tokens=int(kwargs.get("gemini_max_output_tokens", 64)),
+            gemini_max_output_tokens=_optional_int(kwargs.get("gemini_max_output_tokens")),
             llava_max_new_tokens=int(kwargs.get("llava_max_new_tokens", 64)),
             gemini_temperature=float(kwargs.get("gemini_temperature", 0.0)),
             llava_temperature=float(kwargs.get("llava_temperature", 0.0)),
@@ -918,7 +926,7 @@ def get_backend(name: str, **kwargs: Any) -> VerificationBackend:
         return GeminiTwoVoteBackend(
             image_root=kwargs.get("image_root"),
             gemini_model=kwargs.get("gemini_model", "gemini-2.5-flash-lite"),
-            gemini_max_output_tokens=int(kwargs.get("gemini_max_output_tokens", 64)),
+            gemini_max_output_tokens=_optional_int(kwargs.get("gemini_max_output_tokens")),
             gemini_temperature=float(kwargs.get("gemini_temperature", 0.0)),
             gemini_runtime=kwargs.get("gemini_runtime"),
         )
@@ -926,10 +934,10 @@ def get_backend(name: str, **kwargs: Any) -> VerificationBackend:
         return GeminiOpenAITwoVoteBackend(
             image_root=kwargs.get("image_root"),
             gemini_model=kwargs.get("gemini_model", "gemini-2.5-flash-lite"),
-            gemini_max_output_tokens=int(kwargs.get("gemini_max_output_tokens", 128)),
+            gemini_max_output_tokens=_optional_int(kwargs.get("gemini_max_output_tokens")),
             gemini_temperature=float(kwargs.get("gemini_temperature", 0.0)),
             openai_model=kwargs.get("openai_model", "gpt-4o-mini"),
-            openai_max_output_tokens=int(kwargs.get("openai_max_output_tokens", 128)),
+            openai_max_output_tokens=_optional_int(kwargs.get("openai_max_output_tokens")),
             openai_temperature=float(kwargs.get("openai_temperature", 0.0)),
             gemini_runtime=kwargs.get("gemini_runtime"),
             openai_runtime=kwargs.get("openai_runtime"),

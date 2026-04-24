@@ -148,8 +148,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gemini-max-output-tokens",
         type=int,
-        default=128,
-        help="Max output tokens for each Gemini judge vote.",
+        default=None,
+        help="Optional max output tokens for each Gemini judge vote; omit for provider default.",
     )
     parser.add_argument(
         "--openai-model",
@@ -160,8 +160,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--openai-max-output-tokens",
         type=int,
-        default=128,
-        help="Max output tokens for each OpenAI judge vote.",
+        default=None,
+        help="Optional max output tokens for each OpenAI judge vote; omit for provider default.",
     )
     parser.add_argument(
         "--llava-device",

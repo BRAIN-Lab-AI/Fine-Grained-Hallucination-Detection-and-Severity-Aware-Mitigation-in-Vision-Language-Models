@@ -62,9 +62,9 @@ LLAVA_CONV_MODE="${LLAVA_CONV_MODE:-vicuna_v1}"
 IMAGE_ROOT="${IMAGE_ROOT:-${REPO_ROOT}}"
 LLAVA_MAX_NEW_TOKENS="${LLAVA_MAX_NEW_TOKENS:-128}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash-lite}"
-GEMINI_MAX_OUTPUT_TOKENS="${GEMINI_MAX_OUTPUT_TOKENS:-128}"
+GEMINI_MAX_OUTPUT_TOKENS="${GEMINI_MAX_OUTPUT_TOKENS:-}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
-OPENAI_MAX_OUTPUT_TOKENS="${OPENAI_MAX_OUTPUT_TOKENS:-128}"
+OPENAI_MAX_OUTPUT_TOKENS="${OPENAI_MAX_OUTPUT_TOKENS:-}"
 ROW_WORKERS="${ROW_WORKERS:-1}"
 LLAVA_DEVICE="${LLAVA_DEVICE:-}"
 RESUME="${RESUME:-0}"
@@ -143,8 +143,10 @@ if [ "${BACKEND}" = "gemini_llava_two_vote" ]; then
     --llava-conv-mode "${LLAVA_CONV_MODE}"
     --llava-max-new-tokens "${LLAVA_MAX_NEW_TOKENS}"
     --gemini-model "${GEMINI_MODEL}"
-    --gemini-max-output-tokens "${GEMINI_MAX_OUTPUT_TOKENS}"
   )
+  if [ -n "${GEMINI_MAX_OUTPUT_TOKENS}" ]; then
+    CMD+=(--gemini-max-output-tokens "${GEMINI_MAX_OUTPUT_TOKENS}")
+  fi
   if [ -n "${LLAVA_DEVICE}" ]; then
     CMD+=(--llava-device "${LLAVA_DEVICE}")
   fi
@@ -161,8 +163,10 @@ if [ "${BACKEND}" = "gemini_two_vote" ]; then
   CMD+=(
     --image-root "${IMAGE_ROOT}"
     --gemini-model "${GEMINI_MODEL}"
-    --gemini-max-output-tokens "${GEMINI_MAX_OUTPUT_TOKENS}"
   )
+  if [ -n "${GEMINI_MAX_OUTPUT_TOKENS}" ]; then
+    CMD+=(--gemini-max-output-tokens "${GEMINI_MAX_OUTPUT_TOKENS}")
+  fi
 fi
 
 if [ "${BACKEND}" = "gemini_openai_two_vote" ]; then
@@ -173,10 +177,14 @@ if [ "${BACKEND}" = "gemini_openai_two_vote" ]; then
   CMD+=(
     --image-root "${IMAGE_ROOT}"
     --gemini-model "${GEMINI_MODEL}"
-    --gemini-max-output-tokens "${GEMINI_MAX_OUTPUT_TOKENS}"
     --openai-model "${OPENAI_MODEL}"
-    --openai-max-output-tokens "${OPENAI_MAX_OUTPUT_TOKENS}"
   )
+  if [ -n "${GEMINI_MAX_OUTPUT_TOKENS}" ]; then
+    CMD+=(--gemini-max-output-tokens "${GEMINI_MAX_OUTPUT_TOKENS}")
+  fi
+  if [ -n "${OPENAI_MAX_OUTPUT_TOKENS}" ]; then
+    CMD+=(--openai-max-output-tokens "${OPENAI_MAX_OUTPUT_TOKENS}")
+  fi
 fi
 
 "${CMD[@]}" "$@"

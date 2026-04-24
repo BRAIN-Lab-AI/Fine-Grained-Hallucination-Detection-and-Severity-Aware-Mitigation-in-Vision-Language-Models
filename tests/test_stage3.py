@@ -259,6 +259,42 @@ class JudgeParsingTests(unittest.TestCase):
             stage3_backends._extract_json_object("unclear maybe perhaps")
 
 
+class HostedRuntimePayloadTests(unittest.TestCase):
+    def test_gemini_omits_max_output_tokens_when_unset(self) -> None:
+        runtime = stage3_backends._GeminiJudgeRuntime(api_key="test", max_output_tokens=None)
+        captured = {}
+
+        def fake_request(payload):
+            captured.update(payload)
+            return {
+                "candidates": [
+                    {"content": {"parts": [{"text": '{"approved": true, "reason": "ok"}'}]}}
+                ]
+            }
+
+        runtime._request = fake_request
+        runtime.judge(_make_stage2_record().to_dict(), "hallucination_removal")
+
+        self.assertNotIn("maxOutputTokens", captured["generationConfig"])
+
+    def test_openai_omits_max_tokens_when_unset(self) -> None:
+        runtime = stage3_backends._OpenAIJudgeRuntime(api_key="test", max_output_tokens=None)
+        captured = {}
+
+        def fake_request(payload):
+            captured.update(payload)
+            return {
+                "choices": [
+                    {"message": {"content": '{"approved": true, "reason": "ok"}'}}
+                ]
+            }
+
+        runtime._request = fake_request
+        runtime.judge(_make_stage2_record().to_dict(), "content_preservation")
+
+        self.assertNotIn("max_tokens", captured)
+
+
 class PromptTests(unittest.TestCase):
     def test_prompt_avoids_decision_and_reason_placeholders(self) -> None:
         prompt = stage3_prompts.build_vote_prompt(
