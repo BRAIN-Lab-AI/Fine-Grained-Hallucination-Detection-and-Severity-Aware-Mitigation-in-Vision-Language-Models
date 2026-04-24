@@ -144,6 +144,35 @@ class Stage4CLITests(unittest.TestCase):
             self.assertEqual(len(_read_jsonl(repair_prefs)), 1)
             self.assertEqual(len(_read_jsonl(final_prefs)), 1)
 
+    def test_missing_stage3_preferences_means_zero_approved_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            stage3_audit = tmp_dir / "stage3.jsonl"
+            missing_stage3_prefs = tmp_dir / "missing_stage3_prefs.jsonl"
+            repair_records = tmp_dir / "repair.jsonl"
+            repair_prefs = tmp_dir / "repair_prefs.jsonl"
+            final_prefs = tmp_dir / "final_prefs.jsonl"
+            stats_path = tmp_dir / "stats.json"
+            write_jsonl(stage3_audit, [_stage3_row(row_id=2, passed=False)])
+
+            rc = stage4_main(
+                [
+                    "--input", str(stage3_audit),
+                    "--stage3-preferences", str(missing_stage3_prefs),
+                    "--output", str(repair_records),
+                    "--repair-preferences-out", str(repair_prefs),
+                    "--final-preferences-out", str(final_prefs),
+                    "--stats-out", str(stats_path),
+                    "--backend", "template",
+                ]
+            )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual([row["id"] for row in _read_jsonl(repair_records)], [2])
+            self.assertEqual([row["id"] for row in _read_jsonl(final_prefs)], [2])
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            self.assertEqual(stats["stage3_approved_pairs"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

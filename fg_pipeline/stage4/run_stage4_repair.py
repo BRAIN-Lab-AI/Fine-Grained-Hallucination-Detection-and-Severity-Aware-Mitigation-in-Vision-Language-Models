@@ -284,8 +284,10 @@ def main(argv: list[str] | None = None) -> int:
         print("Run Stage 3 first:  bash scripts/run_stage3_validate.sh", file=sys.stderr)
         return 2
     if not args.stage3_preferences.exists():
-        print(f"Stage 4 Stage 3 preferences not found: {args.stage3_preferences}", file=sys.stderr)
-        return 2
+        print(
+            f"Stage 4 Stage 3 preferences not found; treating as zero approved rows: {args.stage3_preferences}",
+            file=sys.stderr,
+        )
 
     try:
         backend = _get_backend(
