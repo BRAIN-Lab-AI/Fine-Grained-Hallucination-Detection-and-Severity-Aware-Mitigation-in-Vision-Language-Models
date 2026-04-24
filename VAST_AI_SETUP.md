@@ -171,6 +171,8 @@ example:
 MODEL_PATH=models/llava-v1.5-13b
 QWEN_MODEL_PATH=models/Qwen-VL-Chat
 LLAVA_MODEL_PATH=models/llava-v1.5-13b
+QWEN_DEVICE=cuda:0
+LLAVA_DEVICE=cuda:1
 NUM_GPUS=1
 BATCH_SIZE=1
 EPOCH=1
