@@ -16,9 +16,10 @@ Current state:
   Consumes Stage 2 JSONL, emits a Stage 3 audit JSONL plus clean trainer-
   compatible preference pairs. Default backend is
   :class:`~fg_pipeline.stage3.HeuristicVerificationBackend`.
-- Stage 4 (severity-aware DPO) is the released HSA-DPO baseline trainer
-  reached via ``hsa_dpo_train.sh`` or the project wrapper
-  ``scripts/run_stage4_train.sh``.
+- Stage 4 (``fg_pipeline.stage4``) repairs Stage 3 rejected rewrites with
+  LLaVA and builds the final preference dataset.
+- Stage 5 is severity-margin DPO training reached via
+  ``scripts/run_stage5_train.sh``.
 
 Shared utilities live in ``io_utils``, ``paths``, and ``schemas``.
 """
@@ -43,6 +44,7 @@ from fg_pipeline.stage3 import (
     VerificationBackend,
     VoteDecision,
 )
+from fg_pipeline.stage4 import Stage4RepairRecord
 
 __all__ = [
     "io_utils",
@@ -51,6 +53,7 @@ __all__ = [
     "stage1",
     "stage2",
     "stage3",
+    "stage4",
     "PreferenceCleanRecord",
     "Stage1Record",
     "CritiqueItem",
@@ -65,4 +68,5 @@ __all__ = [
     "VoteDecision",
     "VerificationBackend",
     "HeuristicVerificationBackend",
+    "Stage4RepairRecord",
 ]

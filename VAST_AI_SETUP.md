@@ -177,7 +177,7 @@ BATCH_SIZE=1
 EPOCH=1
 ```
 
-The Stage 2, Stage 3, Stage 4, and pilot-train launchers now load this file
+The Stage 2, Stage 3, Stage 4, Stage 5, and pilot-train launchers now load this file
 automatically when it exists.
 
 ## 6. Step 5: Download The Base Model
@@ -193,9 +193,17 @@ The training script already points to:
 
 - `MODEL_PATH="./models/llava-v1.5-13b"`
 
-## 7. Step 6: Verify Repo Paths Before Running Training
+## 7. Step 6: Verify Repo Paths Before Running The Main Pipeline
 
-The paths that matter for baseline Stage 4 training:
+The paths that matter for the redesigned Stage 1-5 run:
+
+- Stage 3 audit: `./output/fghd/stage3/vote_records.jsonl`
+- Stage 3 approved pairs: `./output/fghd/stage3/preference_pairs.jsonl`
+- Stage 4 final pairs: `./output/fghd/stage4/final_preference_pairs.jsonl`
+- model path: `./models/llava-v1.5-13b`
+- Stage 5 output: `./output/fghd/stage5_llava_margin`
+
+The paths that matter for baseline-only HSA-DPO reproduction:
 
 - preference dataset: `./hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl`
 - training image folder: `./hsa_dpo/data/images`
@@ -243,18 +251,27 @@ LLAVA_DEVICE=cuda:0 \
 bash scripts/run_stage3_validate.sh
 ```
 
-## 8. Step 7: Run Stage 4 Training (HSA-DPO Baseline)
+## 8. Step 7: Run Stage 4 Repair And Stage 5 Training
 
-For the redesigned Stage 1-4 project pipeline, run Stage 4 through the wrapper
-after Stage 3:
+For the redesigned Stage 1-5 project pipeline, run Stage 4 repair after Stage 3:
 
 ```bash
 source .venv/bin/activate
-bash scripts/run_stage4_train.sh
+bash scripts/run_stage4_rewrite.sh
 ```
 
-This uses `output/fghd/stage3/preference_pairs.jsonl` as the training data and
-writes checkpoints under `output/fghd/stage4_llava`.
+This repairs only Stage 3 rejected rows and writes the combined training file at
+`output/fghd/stage4/final_preference_pairs.jsonl`.
+
+Then run Stage 5 training:
+
+```bash
+source .venv/bin/activate
+bash scripts/run_stage5_train.sh
+```
+
+This uses `output/fghd/stage4/final_preference_pairs.jsonl` as the training data
+and writes checkpoints under `output/fghd/stage5_llava_margin`.
 
 For a baseline-only reproduction run, use the released preference data
 directly:
@@ -334,9 +351,10 @@ are not yet paper-faithful are intentionally kept out of the strict paper table.
    preference pairs from the Stage 2 rewrites; if `GEMINI_API_KEY` or
    `GOOGLE_API_KEY` is set, the launcher prefers `gemini_two_vote`
    automatically
-7. run `bash scripts/run_stage4_train.sh` on a 2-GPU box for the redesigned
+7. run `bash scripts/run_stage4_rewrite.sh` to repair Stage 3 rejects
+8. run `bash scripts/run_stage5_train.sh` on a GPU box for the redesigned
    pipeline, or `bash hsa_dpo_train.sh` for a baseline-only reproduction
-8. optionally run `bash scripts/run_paper_eval.sh` / `bash scripts/run_general_eval.sh`
+9. optionally run `bash scripts/run_paper_eval.sh` / `bash scripts/run_general_eval.sh`
 
 If you switch to a new template or GPU type, the first thing to copy over is:
 

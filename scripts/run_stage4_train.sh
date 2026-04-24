@@ -23,7 +23,9 @@ if [ ! -f "${DATA_PATH}" ]; then
   exit 1
 fi
 
-echo "Stage 4 wrapper uses Stage 3 preference pairs."
+echo "Legacy Stage 3-only HSA-DPO wrapper uses Stage 3 preference pairs."
+echo "For the redesigned pipeline, run Stage 4 repair then Stage 5 training:"
+echo "  bash scripts/run_stage4_rewrite.sh && bash scripts/run_stage5_train.sh"
 echo "Current limitation: the released detection data does not expose the original"
 echo "user prompt separately, so the Stage 3 'question' field may mirror the"
 echo "assessed candidate sentence from Stage 1."

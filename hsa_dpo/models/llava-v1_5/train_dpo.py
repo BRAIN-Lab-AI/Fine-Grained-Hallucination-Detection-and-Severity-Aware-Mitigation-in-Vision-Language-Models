@@ -116,6 +116,9 @@ class ScriptArguments:
     beta: Optional[float] = field(default=0.5, metadata={"help": "the beta parameter for DPO loss"})
     use_chosen_score: Optional[bool] = field(default=False, metadata={"help": "whether to use chosen score in DPO loss"})
     use_rejected_score: Optional[bool] = field(default=True, metadata={"help": "whether to use rejected score in DPO loss"})
+    dpo_loss_type: Optional[str] = field(default="hsa_weighted", metadata={"help": "DPO loss type: hsa_weighted, severity_margin, or standard"})
+    severity_margin_scale: Optional[float] = field(default=0.5, metadata={"help": "severity margin multiplier for severity_margin DPO"})
+    severity_score_normalizer: Optional[float] = field(default=3.0, metadata={"help": "max severity score used to normalize severity margins"})
 
     # training parameters
     learning_rate: Optional[float] = field(default=5e-4, metadata={"help": "optimizer learning rate"})
@@ -816,6 +819,9 @@ def main():
         beta=script_args.beta,
         use_chosen_score=script_args.use_chosen_score,
         use_rejected_score=script_args.use_rejected_score,
+        dpo_loss_type=script_args.dpo_loss_type,
+        severity_margin_scale=script_args.severity_margin_scale,
+        severity_score_normalizer=script_args.severity_score_normalizer,
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_length=script_args.max_length,

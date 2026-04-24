@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -114,6 +114,7 @@ class LlavaRewriteBackend:
         max_new_tokens: int = 256,
         temperature: float = 0.0,
         image_root: Optional[str] = None,
+        prompt_builder: Optional[Callable[[Any], str]] = None,
     ) -> None:
         self._model_path = model_path
         self._model_base = model_base
@@ -121,6 +122,7 @@ class LlavaRewriteBackend:
         self._max_new_tokens = max_new_tokens
         self._temperature = temperature
         self._image_root = Path(image_root) if image_root else Path(".")
+        self._prompt_builder = prompt_builder
         self._bundle: Optional[tuple] = None  # lazy loaded
 
     def _ensure_llava_on_path(self) -> None:
@@ -169,9 +171,12 @@ class LlavaRewriteBackend:
             tokenizer_image_token,
         )
 
-        from fg_pipeline.stage2.prompts import build_rewrite_prompt
+        if self._prompt_builder is None:
+            from fg_pipeline.stage2.prompts import build_rewrite_prompt
 
-        prompt_text = build_rewrite_prompt(record)
+            prompt_text = build_rewrite_prompt(record)
+        else:
+            prompt_text = self._prompt_builder(record)
 
         # Resolve image path — prepend image_root if path is relative.
         image_path_str = (

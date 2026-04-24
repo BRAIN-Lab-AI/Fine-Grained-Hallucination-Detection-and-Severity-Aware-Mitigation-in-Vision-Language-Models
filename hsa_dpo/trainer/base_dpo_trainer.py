@@ -117,6 +117,9 @@ class BaseDPOTrainer(Trainer):
         gamma: Optional[float] = 0.0,
         use_chosen_score: bool = False,
         use_rejected_score: bool = True,
+        dpo_loss_type: str = "hsa_weighted",
+        severity_margin_scale: float = 0.5,
+        severity_score_normalizer: float = 3.0,
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -204,6 +207,9 @@ class BaseDPOTrainer(Trainer):
         self.beta = beta
         self.use_chosen_score = use_chosen_score
         self.use_rejected_score = use_rejected_score
+        self.dpo_loss_type = dpo_loss_type
+        self.severity_margin_scale = float(severity_margin_scale)
+        self.severity_score_normalizer = float(severity_score_normalizer)
         
         self.label_pad_token_id = label_pad_token_id
         self.padding_value = padding_value
@@ -307,27 +313,43 @@ class BaseDPOTrainer(Trainer):
         if rejected_scores is None:
             rejected_scores = torch.tensor(1.0, device=policy_rejected_logps.device)
 
-        # Apply scores based on use_chosen_score and use_rejected_score flags
-        if self.use_chosen_score:
-            chosen_weight = chosen_scores
-        else:
-            chosen_weight = torch.ones_like(chosen_scores)
-            
-        if self.use_rejected_score:
-            rejected_weight = rejected_scores
-        else:
-            rejected_weight = torch.ones_like(rejected_scores)
+        loss_type = getattr(self, "dpo_loss_type", "hsa_weighted")
+        if loss_type == "hsa_weighted":
+            # Original HSA-DPO behavior: severity weights the rejected log-prob term.
+            if self.use_chosen_score:
+                chosen_weight = chosen_scores
+            else:
+                chosen_weight = torch.ones_like(chosen_scores)
 
-        # Calculate log ratios with weighted scores
-        pi_logratios = chosen_weight * policy_chosen_logps - rejected_weight * policy_rejected_logps
-        ref_logratios = chosen_weight * reference_chosen_logps - rejected_weight * reference_rejected_logps
+            if self.use_rejected_score:
+                rejected_weight = rejected_scores
+            else:
+                rejected_weight = torch.ones_like(rejected_scores)
+
+            pi_logratios = chosen_weight * policy_chosen_logps - rejected_weight * policy_rejected_logps
+            ref_logratios = chosen_weight * reference_chosen_logps - rejected_weight * reference_rejected_logps
+            margin = 0.0
+        elif loss_type == "severity_margin":
+            # New Stage 5 objective: higher severity requires a larger chosen/rejected gap.
+            pi_logratios = policy_chosen_logps - policy_rejected_logps
+            ref_logratios = reference_chosen_logps - reference_rejected_logps
+            normalizer = max(float(getattr(self, "severity_score_normalizer", 3.0)), 1e-6)
+            severity = torch.clamp(rejected_scores.to(policy_chosen_logps.device).float(), min=0.0, max=normalizer)
+            severity = severity / normalizer
+            margin = float(getattr(self, "severity_margin_scale", 0.5)) * severity
+        elif loss_type == "standard":
+            pi_logratios = policy_chosen_logps - policy_rejected_logps
+            ref_logratios = reference_chosen_logps - reference_rejected_logps
+            margin = 0.0
+        else:
+            raise ValueError(f"unknown dpo_loss_type={loss_type!r}; expected hsa_weighted, severity_margin, or standard")
 
         if reference_free:
             ref_logratios = 0
 
         logits = pi_logratios - ref_logratios
         
-        losses = -F.logsigmoid(self.beta * logits)
+        losses = -F.logsigmoid(self.beta * (logits - margin))
         chosen_rewards = self.beta * (policy_chosen_logps - reference_chosen_logps).detach()
         rejected_rewards = self.beta * (policy_rejected_logps - reference_rejected_logps).detach()
 

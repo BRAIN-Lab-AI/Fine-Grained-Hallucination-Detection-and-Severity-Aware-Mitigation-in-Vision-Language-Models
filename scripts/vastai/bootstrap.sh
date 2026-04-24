@@ -38,5 +38,7 @@ echo "3. bash scripts/run_stage1_critiques.sh  # Stage 1 critique extraction (CP
 echo "4. bash scripts/run_stage2_rewrites.sh  # Stage 2 rewrite (template backend, CPU ok)"
 echo "   # For real rewrite: BACKEND=llava MODEL_PATH=models/llava-v1.5-13b bash scripts/run_stage2_rewrites.sh"
 echo "5. bash scripts/run_stage3_validate.sh  # Stage 3 majority-vote validation"
-echo "6. bash scripts/run_stage4_train.sh  # Stage 4 training on Stage 3 preference pairs"
+echo "6. bash scripts/run_stage4_rewrite.sh  # Stage 4 repair rejected rewrites"
+echo "7. bash scripts/run_stage5_train.sh  # Stage 5 severity-margin DPO"
+echo "   # For legacy Stage 3-only training: bash scripts/run_stage4_train.sh"
 echo "   # For baseline-only reproduction: bash hsa_dpo_train.sh"

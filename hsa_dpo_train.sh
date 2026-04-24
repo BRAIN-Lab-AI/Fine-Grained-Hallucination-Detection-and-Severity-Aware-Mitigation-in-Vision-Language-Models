@@ -22,6 +22,9 @@ EPOCH="${EPOCH:-2}"
 LEARNING_RATE="${LEARNING_RATE:-2e-6}"
 USE_CHOSEN_SCORE="${USE_CHOSEN_SCORE:-False}"
 USE_REJECTED_SCORE="${USE_REJECTED_SCORE:-True}"
+DPO_LOSS_TYPE="${DPO_LOSS_TYPE:-hsa_weighted}"
+SEVERITY_MARGIN_SCALE="${SEVERITY_MARGIN_SCALE:-0.5}"
+SEVERITY_SCORE_NORMALIZER="${SEVERITY_SCORE_NORMALIZER:-3.0}"
 
 # Project-local defaults. Override with env vars if needed.
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl}"
@@ -99,6 +102,7 @@ echo "Output directory: ${OUTPUT_DIR}"
 echo "Using ${NUM_GPUS} GPUs"
 echo "Chosen score weighting: ${USE_CHOSEN_SCORE}"
 echo "Rejected score weighting: ${USE_REJECTED_SCORE}"
+echo "DPO loss type: ${DPO_LOSS_TYPE}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -141,6 +145,9 @@ deepspeed --num_gpus="${NUM_GPUS}" "${ENTRY}" \
     --deepspeed "${DS_CONFIG}" \
     --beta 0.1 \
     --use_chosen_score "${USE_CHOSEN_SCORE}" \
-    --use_rejected_score "${USE_REJECTED_SCORE}"
+    --use_rejected_score "${USE_REJECTED_SCORE}" \
+    --dpo_loss_type "${DPO_LOSS_TYPE}" \
+    --severity_margin_scale "${SEVERITY_MARGIN_SCALE}" \
+    --severity_score_normalizer "${SEVERITY_SCORE_NORMALIZER}"
 
 echo "Training completed!"

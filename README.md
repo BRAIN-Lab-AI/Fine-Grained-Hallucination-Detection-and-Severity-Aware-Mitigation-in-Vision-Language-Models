@@ -26,7 +26,7 @@
         <img src='https://img.shields.io/badge/Dataset-HuggingFace-yellow' alt='Dataset'></a>
         <a href="https://modelscope.cn/models/xiaowenyi/HSA-DPO">
         <img src='https://img.shields.io/badge/Model-ModelScope-blue' alt='Dataset'></a>
-        
+
   </p>
 </p>
 
@@ -43,11 +43,12 @@ This working copy has two layers:
 
 Project status:
 
-- the project method has been redesigned around four stages: (1) critique detection / extraction, (2) critique-guided rewrite, (3) majority-vote preference validation, and (4) severity-aware DPO
+- the project method has been redesigned around five stages: (1) critique detection / extraction, (2) critique-guided rewrite, (3) preference validation, (4) LLaVA repair of rejected rewrites, and (5) severity-margin DPO
 - Stage 1 is implemented under `fg_pipeline/stage1/`; the default backend (`ReleasedAnnotationBackend`) parses the released `hsa_dpo_detection.jsonl` supervision into a normalized `Stage1Record` without any model inference, and the local research path now includes a `LlavaDetectorBackend` plus detector dataset-prep / train / benchmark-export entrypoints
 - Stage 2 is implemented under `fg_pipeline/stage2/`; it consumes Stage 1 JSONL and emits one corrected rewrite per hallucinated record; the default `TemplateRewriteBackend` is smoke-only and deterministic; the intended research path is `LlavaRewriteBackend` using the vendored LLaVA-v1.5 stack
-- Stage 3 is implemented under `fg_pipeline/stage3/`; it runs verification votes per rewrite, writes an audit JSONL, and exports trainer-compatible preference pairs for Stage 4; the default `HeuristicVerificationBackend` is deterministic and smoke-oriented, while research runs use `gemini_two_vote` or `gemini_llava_two_vote`
-- Stage 4 remains the released HSA-DPO trainer, now reachable either directly via `hsa_dpo_train.sh` or through `scripts/run_stage4_train.sh`, which feeds Stage 3 preference pairs into the unchanged trainer path
+- Stage 3 is implemented under `fg_pipeline/stage3/`; it runs verification votes per rewrite, writes an audit JSONL, and exports initially approved preference pairs; the default `HeuristicVerificationBackend` is deterministic and smoke-oriented, while research runs use `gemini_two_vote` or `gemini_llava_two_vote`
+- Stage 4 is implemented under `fg_pipeline/stage4/`; it repairs Stage 3 rejected rewrites with LLaVA and writes the final combined preference dataset
+- Stage 5 trains LLaVA with severity-margin DPO through `scripts/run_stage5_train.sh`; the legacy HSA-DPO wrapper remains available as `scripts/run_stage4_train.sh`
 - the earlier confidence-based Stage 3-5 implementation remains fully removed and the new design does not reintroduce any confidence / calibration / threshold logic
 
 Design rule for this project:
@@ -99,12 +100,12 @@ hf download --repo-type dataset WenyiXiao/HSA-DPO --local-dir ./datasets
 
 ### Dataset Organization
 
-**For hallucination detection:** 
+**For hallucination detection:**
 - Training data: `hsa_dpo_detection.jsonl`
 - Images: from [Visual Genome](https://homes.cs.washington.edu/~ranjay/visualgenome/api.html), stored under `./vg/images`
 
-**For hallucination mitigation (HSA-DPO training):** 
-- Preference data: `hsa_dpo_preference_llava1dot5.jsonl` 
+**For hallucination mitigation (HSA-DPO training):**
+- Preference data: `hsa_dpo_preference_llava1dot5.jsonl`
 - Images: extracted into `./hsa_dpo/data/images`
 
 **Optional external data (not used by default):**
@@ -181,13 +182,14 @@ bash hsa_dpo_train.sh
 
 ## Project Extension Pipeline
 
-The project method is being rebuilt around four stages: (1) critique detection / extraction, (2) critique-guided rewrite, (3) majority-vote preference validation, (4) severity-aware DPO. The earlier confidence-based approach (confidence scoring, calibration, thresholding, and CRC / CV-CRC selection) remains removed and is not part of the new design.
+The project method is being rebuilt around five stages: (1) critique detection / extraction, (2) critique-guided rewrite, (3) preference validation, (4) LLaVA repair of rejected rewrites, (5) severity-margin DPO. The earlier confidence-based approach (confidence scoring, calibration, thresholding, and CRC / CV-CRC selection) remains removed and is not part of the new design.
 
 What currently lives under `fg_pipeline/`:
 
 - `fg_pipeline/stage1/` — Stage 1 critique detection / extraction (parser, local detector backend, detector data prep / export CLIs)
 - `fg_pipeline/stage2/` — Stage 2 critique-guided rewrite (prompt template, smoke backend, LLaVA backend seam, CLI)
 - `fg_pipeline/stage3/` — Stage 3 preference verification (vote schema, heuristic backend, Gemini/Gemini+LLaVA backends, CLI)
+- `fg_pipeline/stage4/` — Stage 4 repair pass for Stage 3 rejected rewrites and final preference construction
 - `fg_pipeline/io_utils.py`, `fg_pipeline/paths.py`, `fg_pipeline/schemas.py` — shared utilities
 - `fg_pipeline/eval/` — strict paper-comparison and supplemental local evaluation tooling
 - `fg_pipeline/data/` — curated data fixtures (Stage 1 supervision mirror, smoke fixture, paper reference tables)
@@ -262,13 +264,37 @@ bash scripts/run_general_eval.sh
 python -m fg_pipeline.eval.run_eval --help
 ```
 
-### Training (Stage 4 — severity-aware DPO)
+Stage 4 repair launcher:
 
-Stage 4 keeps the released HSA-DPO trainer unchanged:
+```bash
+bash scripts/run_stage4_rewrite.sh
+# or:
+python -m fg_pipeline.stage4.run_stage4_repair --help
+```
+
+Stage 4 consumes `output/fghd/stage3/vote_records.jsonl` plus
+`output/fghd/stage3/preference_pairs.jsonl`, repairs rejected rows, and writes
+the final training set to `output/fghd/stage4/final_preference_pairs.jsonl`.
+
+### Training (Stage 5 — severity-margin DPO)
+
+For the redesigned Stage 1-5 pipeline, use:
+
+```bash
+bash scripts/run_stage5_train.sh
+```
+
+This wrapper points `DATA_PATH` at
+`output/fghd/stage4/final_preference_pairs.jsonl`, sets `OUTPUT_DIR` to
+`output/fghd/stage5_llava_margin`, and trains with `DPO_LOSS_TYPE=severity_margin`.
+
+### Legacy Training (Stage 3-only HSA-DPO)
+
+The legacy wrapper keeps the released HSA-DPO trainer path available:
 `hsa_dpo_train.sh` → `hsa_dpo/models/llava-v1_5/train_dpo.py` →
 `hsa_dpo.trainer.LlavaDPOTrainer`.
 
-For the redesigned Stage 1-4 pipeline, use:
+For the older Stage 3-only training path, use:
 
 ```bash
 bash scripts/run_stage4_train.sh
@@ -293,6 +319,8 @@ bash hsa_dpo_train.sh
 
 - `use_chosen_score`: Whether to use chosen scores in DPO loss (default: False)
 - `use_rejected_score`: Whether to use rejected scores in DPO loss (default: True — reproduces the HSA-DPO severity-weighted rejected term)
+- `dpo_loss_type`: `hsa_weighted`, `severity_margin`, or `standard`
+- `severity_margin_scale`: Margin multiplier for Stage 5 severity-margin DPO
 - `beta`: Temperature parameter for DPO loss (default: 0.1)
 - `num_train_epochs`: Number of training epochs (default: 2)
 - `per_device_train_batch_size`: Batch size per GPU (default: 8)
@@ -490,10 +518,10 @@ If you find this work useful, we would appreciate it if you could cite our paper
 
 ```bibtex
 @article{xiao2025hsa_dpo,
-  title     = {Detecting and Mitigating Hallucination in Large Vision Language Models 
+  title     = {Detecting and Mitigating Hallucination in Large Vision Language Models
                via Fine-Grained AI Feedback},
-  author    = {Xiao, Wenyi and Huang, Ziwei and Gan, Leilei and He, Wanggui and 
-               Li, Haoyuan and Yu, Zhelun and Shu, Fangxun and Jiang, Hao and 
+  author    = {Xiao, Wenyi and Huang, Ziwei and Gan, Leilei and He, Wanggui and
+               Li, Haoyuan and Yu, Zhelun and Shu, Fangxun and Jiang, Hao and
                Zhu, Linchao},
   journal   = {Proceedings of the AAAI Conference on Artificial Intelligence},
   volume    = {39},
