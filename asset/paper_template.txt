@@ -1,0 +1,203 @@
+\documentclass{article}
+
+% if you need to pass options to natbib, use, e.g.:
+\PassOptionsToPackage{numbers,compress}{natbib}
+% before loading neurips_2026
+
+\usepackage{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{amsmath}
+
+\title{Implementing and Analyzing a Fine-Grained Hallucination Mitigation Pipeline for Large Vision-Language Models}
+
+\author{%
+  Abdulaziz Alqahtani\\
+  Affiliation \\
+  Address \\
+  \texttt{email} \\
+  \And
+  Alwaleed Alharthi \\
+  Affiliation \\
+  Address \\
+  \texttt{email} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large vision-language models (LVLMs) still suffer from hallucination, where generated responses include content that is not supported by the visual input. This limits their reliability in detailed description and visual reasoning tasks. Existing approaches either detect hallucinations at a coarse level or mitigate them through expensive supervision and preference construction. In this work, we implement and analyze a fine-grained hallucination mitigation pipeline centered on critique extraction, critique-guided rewriting, majority-vote preference validation, and severity-aware direct preference optimization. In addition to these core stages, our implementation includes practical workflow components for calibration, grouped thresholding, and evaluation/reporting. Our goal is not to introduce a new LVLM architecture, but to reproduce and organize an end-to-end fine-grained hallucination handling pipeline in a form suitable for empirical analysis and future extension.
+\end{abstract}
+
+\section{Introduction}
+
+Large vision-language models (LVLMs) have shown strong performance across image captioning, visual question answering, and multimodal reasoning tasks. Despite this progress, LVLMs still suffer from hallucination, where generated responses contain objects, attributes, or relations that are not supported by the visual input \citep{liu2024survey,rohrbach2018object}. This issue directly limits the faithfulness and practical reliability of LVLMs, especially in settings that require grounded description and reasoning.
+
+Research on addressing hallucination in LVLMs can be broadly divided into hallucination detection and hallucination mitigation. Hallucination detection aims to identify whether model responses contain unsupported content \citep{gunjal2024detecting,chen2024unified}. Hallucination mitigation aims to reduce hallucinated generations through additional training or post-processing \citep{liu2024robust,zhou2024analyzing,li2023silkie,yu2024rlhfv}. Although recent work has improved both directions, several challenges remain. First, many methods rely on coarse-grained supervision at the response level, which is suboptimal for locating and correcting specific hallucination errors. Second, constructing high-quality mitigation data often depends on costly human annotation or proprietary closed-source feedback \citep{li2023silkie,yu2024rlhfv}. Third, practical reproduction of a multi-stage mitigation workflow requires more than the core optimization objective alone; it also requires filtering, thresholding, validation, and reporting infrastructure.
+
+To address these issues, our project focuses on implementing a fine-grained hallucination mitigation pipeline for LVLMs, following the recent direction of fine-grained AI feedback \citep{xiao2025hsa}. The workflow is organized around four main stages: fine-grained critique extraction, critique-guided rewriting, majority-vote preference validation, and severity-aware direct preference optimization. In addition to these core stages, the implementation includes supporting workflow components such as calibration, grouped thresholding, and reporting utilities. The overall goal is to build a coherent end-to-end pipeline that can be analyzed stage by stage and later evaluated under standard hallucination-sensitive settings.
+
+Our goal is not to claim a fully novel hallucination framework. Instead, we aim to reproduce and structure a recent fine-grained hallucination mitigation pipeline in a practical project setting, while keeping the design modular enough for further experimentation. This framing positions the work as a careful implementation and analysis of a technically meaningful hallucination mitigation workflow grounded in fine-grained supervision and preference optimization \citep{xiao2025hsa,rafailov2024dpo}.
+
+\section{Related Work}
+
+In this section, we briefly review prior studies on hallucination detection and mitigation in LVLMs.
+
+\subsection{Detecting Hallucination in LVLMs}
+
+Hallucination detection in LVLMs has been studied from both benchmark and model-based perspectives. Early work highlighted object hallucination as a core failure mode in visually grounded generation \citep{rohrbach2018object}. More recent approaches rely on stronger off-the-shelf systems for hallucination identification. For example, Gunjal et al.~\citep{gunjal2024detecting} formulate hallucination handling as a detection-and-prevention problem, while Chen et al.~\citep{chen2024unified} propose a unified framework for multimodal hallucination detection. These studies demonstrate that detection quality can be improved through stronger evaluators and better benchmarks, but many existing approaches still focus on coarse response-level judgments.
+
+Compared with coarse supervision, fine-grained hallucination detection provides a more structured view by decomposing hallucinations into object, attribute, and relationship errors. This type of supervision is especially useful when the downstream goal is not only to detect hallucinations, but also to rewrite hallucinated responses and construct preference pairs for mitigation \citep{xiao2025hsa}.
+
+\subsection{Mitigating Hallucination in LVLMs}
+
+Hallucination mitigation methods can generally be divided into training-free and training-based approaches. Training-free approaches aim to reduce hallucinations during inference, often through decoding or post-processing interventions \citep{zhou2024analyzing}. Training-based approaches instead reduce hallucination through additional instruction tuning or preference learning. Robust instruction tuning has been used to improve multimodal faithfulness \citep{liu2024robust}, while preference-based approaches such as Silkie and RLHF-V build supervision from stronger feedback signals to bias LVLMs toward less hallucinatory responses \citep{li2023silkie,yu2024rlhfv}. Direct Preference Optimization (DPO) further provides an efficient offline preference-learning objective that has become a strong foundation for such training pipelines \citep{rafailov2024dpo}.
+
+Most closely related to our work is the recent fine-grained AI feedback framework of Xiao et al.~\citep{xiao2025hsa}, which combines sentence-level hallucination critique, detect-then-rewrite preference construction, and hallucination severity-aware optimization. Our project is positioned in this direction, with a specific emphasis on implementing the practical end-to-end workflow that connects critique extraction, rewrite generation, validation, and severity-aware preference optimization.
+
+\section{Methodology}
+
+Our implementation follows a staged pipeline for fine-grained hallucination mitigation in LVLMs. The workflow consists of four main stages: fine-grained hallucination critique extraction, critique-guided rewrite generation, majority-vote preference validation, and severity-aware direct preference optimization \citep{xiao2025hsa}. In addition to these stages, we incorporate practical workflow components for calibration, grouped thresholding, and evaluation/reporting.
+
+\subsection{Fine-Grained Hallucination Critique Extraction}
+
+The first stage extracts fine-grained critiques from hallucinated model responses. Rather than treating a response as a single binary unit, this stage identifies localized hallucination issues and associates them with structured critique information. In our setting, the critique output captures not only whether a segment is problematic, but also the type of mismatch and a corresponding severity signal. This stage serves as the foundation for later components, since rewrite generation and preference construction depend on the quality of the extracted critiques.
+
+\subsection{Critique-Guided Rewrite Generation}
+
+Given an input response and its detected critiques, the second stage rewrites the response into a more faithful alternative. The purpose of this stage is to convert critique information into candidate non-hallucinatory responses that are better aligned with the image content. In practice, this stage transforms raw hallucinated generations into corrected alternatives that can later be used for preference construction.
+
+\subsection{Majority-Vote Preference Validation}
+
+Because rewritten outputs are not always guaranteed to be better than the original responses, we include a validation stage before preference optimization. In this stage, preference pairs are filtered using a majority-vote validation mechanism that determines whether the rewritten response should be treated as the chosen response and the original as the rejected one. This step improves the quality of the preference dataset by reducing noisy or weak supervision signals.
+
+\subsection{Severity-Aware Preference Optimization}
+
+After preference validation, the resulting chosen/rejected pairs are used for severity-aware preference optimization. The key idea is that not all hallucinations should be treated equally. More severe hallucinations should receive stronger corrective emphasis during optimization. Therefore, the preference objective is conditioned not only on the relative quality of the pair, but also on the severity information associated with the rejected response. This follows the general preference-learning formulation of DPO while adapting it to fine-grained hallucination mitigation \citep{rafailov2024dpo,xiao2025hsa}.
+
+\subsection{Implementation Workflow Support}
+
+Beyond the main four stages, our implementation also includes supporting workflow components required for practical experimentation. These include calibration of intermediate stages, grouped thresholding strategies, stage-wise execution control, and evaluation/reporting support for comparing outputs across settings. These additions are important because the effectiveness of the full pipeline depends not only on the optimization objective, but also on the reliability of filtering, validation, and experiment organization around it.
+
+\begin{figure}[t]
+  \centering
+  \fbox{\rule[-0.5cm]{0cm}{4.5cm} \rule[-0.5cm]{0.9\linewidth}{0cm}}
+  \caption{Overview of the implemented fine-grained hallucination mitigation pipeline. The figure can later be replaced with the final project workflow diagram showing critique extraction, rewrite generation, preference validation, and severity-aware optimization.}
+  \label{fig:pipeline}
+\end{figure}
+
+\section{Experiments}
+
+In this section, we describe the experimental setting used to study the implemented pipeline. The results-related subsections are intentionally left empty at this stage.
+
+\subsection{Experimental Setting}
+
+We evaluate the project in the setting of fine-grained hallucination mitigation for LVLMs. The implementation is organized as a multi-stage workflow, where hallucinated responses are first critiqued, then rewritten, validated as preference pairs, and finally used for severity-aware optimization. In addition to the core pipeline, we also examine the effect of auxiliary implementation components such as calibration and grouped thresholding.
+
+\subsection{Baselines and Comparisons}
+
+We compare different variants of the implemented workflow to understand the contribution of each component. In particular, we consider settings with and without validated preference filtering, settings with and without severity-aware weighting, and settings that differ in calibration or thresholding behavior.
+
+\subsection{Implementation Details}
+
+The implementation is organized as a staged pipeline with separate execution for critique extraction, rewrite generation, preference validation, and optimization. In addition, the codebase includes workflow extensions for evaluation/reporting and threshold tuning. These components were integrated incrementally during development in order to improve stage-to-stage consistency and enable clearer comparison across experiments.
+
+\subsection{Main Results}
+
+
+\subsection{Ablation Study}
+
+
+\subsection{Analysis}
+
+
+\section{Limitations}
+
+Our project has several limitations. First, it is primarily an implementation and reproduction effort rather than a fully novel hallucination mitigation framework. Second, the effectiveness of the full pipeline depends on the quality of the intermediate stages, especially critique extraction and preference validation. Third, due to project time constraints, not all benchmark settings or large-scale training runs have yet been completed. Finally, workflow components such as thresholding and calibration may be sensitive to the chosen setup, which means that observed behavior may vary across models and datasets.
+
+\section{Conclusion}
+
+In this work, we implemented a fine-grained hallucination mitigation pipeline for large vision-language models. The pipeline is built around four main stages: fine-grained critique extraction, critique-guided rewrite generation, majority-vote preference validation, and severity-aware direct preference optimization. In addition to reproducing the core logic of the approach, we also incorporated practical workflow support including calibration, grouped thresholding, and evaluation/reporting. Overall, the project provides a structured and reproducible basis for studying how fine-grained supervision can be used to improve hallucination handling in LVLMs.
+
+\begin{ack}
+This section is intentionally left blank for the anonymized submission. Funding and acknowledgment details can be added in the camera-ready version if the paper is accepted.
+\end{ack}
+
+\section*{References}
+
+{\small
+\begin{thebibliography}{99}
+
+\bibitem{chen2024unified}
+Chen, X.; Wang, C.; Xue, Y.; Zhang, N.; Yang, X.; Li, Q.; Shen, Y.; Gu, J.; and Chen, H. 2024.
+Unified hallucination detection for multimodal large language models.
+\textit{arXiv preprint arXiv:2402.03190}.
+
+\bibitem{gunjal2024detecting}
+Gunjal, A.; Yin, J.; and Bas, E. 2024.
+Detecting and preventing hallucinations in large vision language models.
+In \textit{Proceedings of the AAAI Conference on Artificial Intelligence}, volume 38, 18135--18143.
+
+\bibitem{li2023silkie}
+Li, L.; Xie, Z.; Li, M.; Chen, S.; Wang, P.; Chen, L.; Yang, Y.; Wang, B.; and Kong, L. 2023.
+Silkie: Preference distillation for large visual language models.
+\textit{arXiv preprint arXiv:2312.10665}.
+
+\bibitem{liu2024survey}
+Liu, H.; Xue, W.; Chen, Y.; Chen, D.; Zhao, X.; Wang, K.; Hou, L.; Li, R.; and Peng, W. 2024.
+A survey on hallucination in large vision-language models.
+\textit{arXiv preprint arXiv:2402.00253}.
+
+\bibitem{liu2024robust}
+Liu, F.; Lin, K.; Li, L.; Wang, J.; Yacoob, Y.; and Wang, L. 2024.
+Mitigating hallucination in large multi-modal models via robust instruction tuning.
+In \textit{The Twelfth International Conference on Learning Representations}.
+
+\bibitem{rafailov2024dpo}
+Rafailov, R.; Sharma, A.; Mitchell, E.; Manning, C. D.; Ermon, S.; and Finn, C. 2024.
+Direct preference optimization: Your language model is secretly a reward model.
+\textit{Advances in Neural Information Processing Systems}, 36.
+
+\bibitem{rohrbach2018object}
+Rohrbach, A.; Hendricks, L. A.; Burns, K.; Darrell, T.; and Saenko, K. 2018.
+Object hallucination in image captioning.
+\textit{arXiv preprint arXiv:1809.02156}.
+
+\bibitem{xiao2025hsa}
+Xiao, W.; Huang, Z.; Gan, L.; He, W.; Li, H.; Yu, Z.; Shu, F.; Jiang, H.; and Zhu, L. 2025.
+Detecting and mitigating hallucination in large vision language models via fine-grained AI feedback.
+In \textit{Proceedings of the AAAI Conference on Artificial Intelligence}, volume 39, number 24, 25543--25551.
+
+\bibitem{yu2024rlhfv}
+Yu, T.; Yao, Y.; Zhang, H.; He, T.; Han, Y.; Cui, G.; Hu, J.; Liu, Z.; Zheng, H.-T.; Sun, M.; et al. 2024.
+RLHF-V: Towards trustworthy MLLMs via behavior alignment from fine-grained correctional human feedback.
+In \textit{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 13807--13816.
+
+\bibitem{zhou2024analyzing}
+Zhou, Y.; Cui, C.; Yoon, J.; Zhang, L.; Deng, Z.; Finn, C.; Bansal, M.; and Yao, H. 2024.
+Analyzing and mitigating object hallucination in large vision-language models.
+In \textit{The Twelfth International Conference on Learning Representations}.
+
+\end{thebibliography}
+}
+
+\appendix
+
+\section{Technical appendices and supplementary material}
+Technical appendices with additional results, figures, graphs, and proofs may be submitted with the paper submission before the full submission deadline. There is no page limit for the technical appendices.
+
+\newpage
+\input{checklist.tex}
+
+\end{document}

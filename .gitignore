@@ -46,9 +46,7 @@ checkpoint-*/
 *.safetensors
 /*.ttf
 
-# Logs
-*.log
-logs/
+# Runtime-only experiment tracker directories
 runs/
 wandb/
 tensorboard/
