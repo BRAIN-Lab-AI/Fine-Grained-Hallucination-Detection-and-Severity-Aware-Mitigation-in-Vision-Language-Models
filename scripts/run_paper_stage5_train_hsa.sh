@@ -11,7 +11,8 @@ IMAGE_FOLDER="${IMAGE_FOLDER:-${REPO_ROOT}}"
 
 if [ ! -f "${DATA_PATH}" ]; then
   echo "Paper Stage 5 HSA-DPO input not found: ${DATA_PATH}" >&2
-  echo "Run: bash scripts/run_paper_stage4_rewrite.sh" >&2
+  echo "Use DATA_PATH=hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl for the direct path," >&2
+  echo "or run: bash scripts/run_released_pref_stage4_repair.sh" >&2
   exit 1
 fi
 if [ ! -s "${DATA_PATH}" ]; then
