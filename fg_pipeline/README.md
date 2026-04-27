@@ -2,12 +2,13 @@
 
 This package is an extension layer on top of the original HSA-DPO repository.
 
-The project method has four stages:
+The project method has five stages:
 
 1. Critique detection / extraction (Stage 1 — implemented)
 2. Critique-guided rewrite (Stage 2 — implemented)
 3. Majority-vote preference validation (Stage 3 — implemented)
-4. Severity-aware DPO (Stage 4 — HSA-DPO baseline under `hsa_dpo/`)
+4. LLaVA repair of rejected rewrites (Stage 4 — implemented)
+5. Severity-margin DPO (Stage 5 — wrapper over `hsa_dpo/`)
 
 Design rule:
 
@@ -37,8 +38,13 @@ Design rule:
   - `schemas.py` — `Stage3Record`, `VoteDecision`
   - `prompts.py` — local judge prompt template
   - `backends.py` — `VerificationBackend` protocol plus
-    `HeuristicVerificationBackend` and `QwenLlavaEnsembleBackend`
+    `HeuristicVerificationBackend`, `GeminiTwoVoteBackend`, and
+    `GeminiLlavaTwoVoteBackend`
   - `run_stage3.py` — CLI (`python -m fg_pipeline.stage3.run_stage3`)
+- `fg_pipeline/stage4/` — Stage 4 repair and final preference construction
+  - `prompts.py` — repair prompt using Stage 1 critiques and Stage 3 vote feedback
+  - `schemas.py` — `Stage4RepairRecord`
+  - `run_stage4_repair.py` — CLI (`python -m fg_pipeline.stage4.run_stage4_repair`)
 - `fg_pipeline/io_utils.py` — JSONL read/write helpers
 - `fg_pipeline/paths.py` — extension-layer default paths (Stages 1-4)
 - `fg_pipeline/schemas.py` — shared records re-exported at the package top level
@@ -137,9 +143,10 @@ Stage 2 output, by design.
 Stage 3 consumes Stage 2 output and decides whether the rewrite is good enough
 to become a training pair.
 
-The default backend (`heuristic`) is deterministic and smoke-only. The local
-research backend is `qwen_llava_ensemble`, which uses Qwen for votes 1 and 3
-and LLaVA for vote 2.
+The default backend (`heuristic`) is deterministic and smoke-only. Research
+runs use `gemini_openai_two_vote` for cross-vendor hosted validation,
+`gemini_two_vote` for the fastest Gemini-only path, or `gemini_llava_two_vote`
+when you need one hosted Gemini vote plus one local LLaVA vote.
 
 ```bash
 bash scripts/run_stage3_validate.sh
@@ -155,24 +162,57 @@ python -m fg_pipeline.stage3.run_stage3 \
   --stats-out output/fghd/stage3/stats.json
 ```
 
-Flags: `--backend heuristic|qwen_llava_ensemble`, `--limit N` (smoke runs),
-`--strict` (fail on malformed Stage 2 rows or backend errors),
-`--qwen-model-path`, `--llava-model-path`, `--llava-model-base`,
-`--image-root`.
+Flags: `--backend heuristic|gemini_openai_two_vote|gemini_two_vote|gemini_llava_two_vote`, `--limit N`
+(smoke runs), `--strict` (fail on malformed Stage 2 rows or backend errors),
+`--llava-model-path`, `--llava-model-base`, `--gemini-model`, `--openai-model`,
+`--image-root`, `--resume`, and `--checkpoint-every`.
 
 Stage 3 output:
 
 - `vote_records.jsonl` — one audit row per hallucinated Stage 2 input,
-  including 3 verification votes
-- `preference_pairs.jsonl` — only pairs with at least 2 approvals
+  including the verification votes
+- `preference_pairs.jsonl` — only pairs approved by the selected backend
 - `stats.json` — compact counts and backend metadata
 
 There are no confidence / calibration / threshold fields on Stages 1-3
 output, by design.
 
+## Running Stage 4
+
+Stage 4 repairs only the rows that Stage 3 rejected. It then combines the
+original Stage 3-approved pairs with the repaired pairs into the final training
+dataset.
+
+```bash
+bash scripts/run_stage4_rewrite.sh
+```
+
+or directly:
+
+```bash
+python -m fg_pipeline.stage4.run_stage4_repair \
+  --input output/fghd/stage3/vote_records.jsonl \
+  --stage3-preferences output/fghd/stage3/preference_pairs.jsonl \
+  --final-preferences-out output/fghd/stage4/final_preference_pairs.jsonl
+```
+
+For smoke tests use `--backend template`. For research runs use
+`--backend llava --model-path models/llava-v1.5-13b`.
+
+## Running Stage 5
+
+Stage 5 trains on `output/fghd/stage4/final_preference_pairs.jsonl` with the
+new `severity_margin` DPO loss:
+
+```bash
+bash scripts/run_stage5_train.sh
+```
+
+Use `scripts/run_stage4_train.sh` only for the older Stage 3-only HSA-DPO path.
+
 ## Downstream compatibility
 
-Stage 4 (severity-aware DPO) still consumes the original HSA-DPO preference
+Stage 5 still consumes the original HSA-DPO preference
 format via `hsa_dpo/models/llava-v1_5/train_dpo.py`. The target schema
 (`PreferenceCleanRecord`, re-exported from `fg_pipeline`) is:
 
@@ -185,9 +225,9 @@ format via `hsa_dpo/models/llava-v1_5/train_dpo.py`. The target schema
 - `image` (optional; explicit path preferred over the legacy
   `<image_folder>/<id>.jpg` fallback)
 
-Stage 3 now emits this schema directly. For the redesigned Stage 1-4 path,
-use `bash scripts/run_stage4_train.sh`, which points the unchanged HSA-DPO
-trainer at `output/fghd/stage3/preference_pairs.jsonl`.
+Stage 3 and Stage 4 both emit this schema. For the redesigned Stage 1-5 path,
+use `bash scripts/run_stage5_train.sh`, which points the trainer at
+`output/fghd/stage4/final_preference_pairs.jsonl`.
 
 Current limitation: the released detection supervision does not expose the
 original user prompt separately, so the `question` field carried into

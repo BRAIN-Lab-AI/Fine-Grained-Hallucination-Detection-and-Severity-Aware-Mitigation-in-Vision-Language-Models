@@ -1,18 +1,23 @@
 """Stage 3 verification backends.
 
 The default backend remains a deterministic heuristic verifier suitable for
-local smoke runs. The research backend is a fully local ``Qwen + LLaVA``
-ensemble that preserves the fixed 3-vote contract without using any hosted
-judge API.
+local smoke runs. Research runs use hosted Gemini judges, optionally paired
+with a local LLaVA judge or hosted OpenAI judge for cross-family validation.
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from fg_pipeline.stage3.prompts import PROMPT_VERSION, build_vote_prompt
 from fg_pipeline.stage3.schemas import VoteDecision
@@ -21,20 +26,41 @@ from fg_pipeline.stage3.schemas import VoteDecision
 VOTE_COUNT = 3
 APPROVALS_REQUIRED = 2
 VOTE_POLICY_VERSION = "heuristic_v1"
-ENSEMBLE_VOTE_POLICY_VERSION = "qwen_llava_ensemble_v1"
+GEMINI_LLAVA_TWO_VOTE_POLICY_VERSION = "gemini_llava_two_vote_v1"
+GEMINI_TWO_VOTE_POLICY_VERSION = "gemini_two_vote_v1"
+GEMINI_OPENAI_TWO_VOTE_POLICY_VERSION = "gemini_openai_two_vote_v1"
 
 _CRITERIA = {
     1: "hallucination_removal",
     2: "content_preservation",
     3: "overall_preference",
 }
-_ENSEMBLE_FAMILY_BY_VOTE = {
-    1: "qwen",
+_GEMINI_LLAVA_FAMILY_BY_VOTE = {
+    1: "gemini",
     2: "llava",
-    3: "qwen",
 }
-
+_GEMINI_TWO_VOTE_FAMILY_BY_VOTE = {
+    1: "gemini",
+    2: "gemini",
+}
+_GEMINI_OPENAI_FAMILY_BY_VOTE = {
+    1: "gemini",
+    2: "openai",
+}
 _WORD_RE = re.compile(r"\w+")
+
+
+def _require_existing_path(path_value: str | None, *, context: str) -> None:
+    path = Path(path_value or "")
+    if path.exists():
+        return
+    raise FileNotFoundError(f"{context} path not found: {path_value}")
+
+
+def _optional_int(value: Any, default: int | None = None) -> int | None:
+    if value is None or value == "":
+        return default
+    return int(value)
 
 
 @runtime_checkable
@@ -89,16 +115,92 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     candidate = (text or "").strip()
     if not candidate:
         raise ValueError("empty judge response")
+    candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\s*```$", "", candidate)
     try:
         payload = json.loads(candidate)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
-        if not match:
-            raise
-        payload = json.loads(match.group(0))
+        payload = _extract_balanced_json(candidate)
+        if payload is None:
+            payload = _fallback_parse_judge_text(candidate)
+        if payload is None:
+            snippet = _shorten_raw_output(candidate)
+            raise ValueError(f"could not parse judge response: {snippet}")
     if not isinstance(payload, dict):
         raise ValueError("judge response JSON is not an object")
     return payload
+
+
+def _extract_balanced_json(text: str) -> dict[str, Any] | None:
+    starts = [index for index, char in enumerate(text) if char == "{"]
+    for start in starts:
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    fragment = text[start:index + 1]
+                    try:
+                        payload = json.loads(fragment)
+                    except json.JSONDecodeError:
+                        break
+                    return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _fallback_parse_judge_text(text: str) -> dict[str, Any] | None:
+    compact = " ".join(text.strip().split())
+    if not compact:
+        return None
+
+    approved: bool | None = None
+    decision_match = re.search(
+        r"\b(?:approved?|decision)\s*[:=\-]\s*(true|false|yes|no|approve|reject|pass|fail)\b",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    if decision_match:
+        approved = _parse_boolean(decision_match.group(1))
+    else:
+        lowered = compact.lower()
+        if re.search(r"\b(do not approve|not approved|reject|rejected|false|no|fail|failed)\b", lowered):
+            approved = False
+        elif re.search(r"\b(approve|approved|true|yes|pass|passed)\b", lowered):
+            approved = True
+
+    if approved is None:
+        return None
+
+    reason = " ".join(compact.split()[:24])
+    reason_match = re.search(r"\breason\s*[:=\-]\s*(.+)$", compact, flags=re.IGNORECASE)
+    if reason_match:
+        reason = reason_match.group(1).strip()
+    return {
+        "approved": approved,
+        "reason": reason or "fallback parsed judge response",
+    }
+
+
+def _shorten_raw_output(text: str, limit: int = 180) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return repr(compact)
+    return repr(compact[:limit] + "...")
 
 
 def _parse_boolean(value: Any) -> bool:
@@ -221,81 +323,6 @@ class HeuristicVerificationBackend:
         )
 
 
-class _QwenJudgeRuntime:
-    family = "qwen"
-
-    def __init__(
-        self,
-        model_path: str,
-        *,
-        image_root: str | None = None,
-        max_new_tokens: int = 256,
-        temperature: float = 0.0,
-    ) -> None:
-        self._model_path = model_path
-        self._image_root = Path(image_root) if image_root else Path(".")
-        self._max_new_tokens = max_new_tokens
-        self._temperature = temperature
-        self._bundle: tuple[Any, Any] | None = None
-
-    def _load(self) -> tuple[Any, Any]:
-        if self._bundle is not None:
-            return self._bundle
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(self._model_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            self._model_path,
-            trust_remote_code=True,
-            torch_dtype="auto",
-            device_map="auto",
-        )
-        model.eval()
-        self._bundle = (tokenizer, model)
-        return self._bundle
-
-    def _resolved_image(self, record: dict[str, Any]) -> Path | None:
-        image_path = record.get("image")
-        if not image_path:
-            return None
-        candidate = Path(image_path)
-        if not candidate.is_absolute():
-            candidate = self._image_root / candidate
-        return candidate if candidate.exists() else None
-
-    def judge(self, record: dict[str, Any], criterion: str) -> str:
-        import torch
-
-        tokenizer, model = self._load()
-        prompt = build_vote_prompt(record, criterion)
-        image_path = self._resolved_image(record)
-
-        if hasattr(tokenizer, "from_list_format") and hasattr(model, "chat"):
-            if image_path:
-                query = tokenizer.from_list_format(
-                    [{"image": str(image_path)}, {"text": prompt}]
-                )
-            else:
-                query = prompt
-            response, _ = model.chat(tokenizer, query=query, history=None)
-            return str(response).strip()
-
-        inputs = tokenizer(prompt, return_tensors="pt")
-        inputs = {key: value.to(model.device) for key, value in inputs.items()}
-        generate_kwargs: dict[str, Any] = {
-            "max_new_tokens": self._max_new_tokens,
-            "do_sample": self._temperature > 0.0,
-        }
-        if self._temperature > 0.0:
-            generate_kwargs["temperature"] = self._temperature
-        else:
-            generate_kwargs["num_beams"] = 1
-        with torch.inference_mode():
-            output_ids = model.generate(**inputs, **generate_kwargs)
-        return tokenizer.decode(output_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-
-
 class _LlavaJudgeRuntime:
     family = "llava"
 
@@ -306,8 +333,9 @@ class _LlavaJudgeRuntime:
         model_base: str | None = None,
         conv_mode: str = "vicuna_v1",
         image_root: str | None = None,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 64,
         temperature: float = 0.0,
+        device: str | None = None,
     ) -> None:
         self._model_path = model_path
         self._model_base = model_base
@@ -315,6 +343,7 @@ class _LlavaJudgeRuntime:
         self._image_root = Path(image_root) if image_root else Path(".")
         self._max_new_tokens = max_new_tokens
         self._temperature = temperature
+        self._device = device
         self._bundle: tuple[Any, Any, Any] | None = None
 
     def _ensure_llava_on_path(self) -> None:
@@ -339,6 +368,8 @@ class _LlavaJudgeRuntime:
             model_path=self._model_path,
             model_base=self._model_base,
             model_name=get_model_name_from_path(self._model_path),
+            device_map={"": self._device} if self._device else "auto",
+            device=self._device or "cuda",
         )
         model.eval()
         self._bundle = (tokenizer, model, image_processor)
@@ -429,41 +460,250 @@ class _LlavaJudgeRuntime:
         )[0].strip()
 
 
-class QwenLlavaEnsembleBackend:
-    """Local research backend with fixed Qwen/LLaVA vote ownership.
-
-    Vote 1: Qwen hallucination removal
-    Vote 2: LLaVA content preservation
-    Vote 3: Qwen overall preference
-
-    A pair passes only when at least two votes approve *and* there is at least
-    one approved vote from each model family.
-    """
-
-    name = "qwen_llava_ensemble"
-    policy_version = ENSEMBLE_VOTE_POLICY_VERSION
-    approval_families_required = ("qwen", "llava")
+class _GeminiJudgeRuntime:
+    family = "gemini"
 
     def __init__(
         self,
         *,
-        qwen_model_path: str,
+        api_key: str | None = None,
+        model: str = "gemini-2.5-flash-lite",
+        image_root: str | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float = 0.0,
+        timeout_seconds: int = 60,
+        retries: int = 3,
+    ) -> None:
+        self._api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not self._api_key:
+            raise EnvironmentError("gemini_llava_two_vote requires GEMINI_API_KEY or GOOGLE_API_KEY")
+        self._model = model
+        self._image_root = Path(image_root) if image_root else Path(".")
+        self._max_output_tokens = max_output_tokens
+        self._temperature = temperature
+        self._timeout_seconds = timeout_seconds
+        self._retries = max(1, retries)
+
+    def _resolved_image(self, record: dict[str, Any]) -> Path | None:
+        image_path = record.get("image")
+        if not image_path:
+            return None
+        candidate = Path(image_path)
+        if not candidate.is_absolute():
+            candidate = self._image_root / candidate
+        return candidate if candidate.exists() else None
+
+    def _image_part(self, image_path: Path) -> dict[str, Any]:
+        data = image_path.read_bytes()
+        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+        return {
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": base64.b64encode(data).decode("ascii"),
+            }
+        }
+
+    def judge(self, record: dict[str, Any], criterion: str) -> str:
+        prompt = build_vote_prompt(record, criterion)
+        parts: list[dict[str, Any]] = []
+        image_path = self._resolved_image(record)
+        if image_path is not None:
+            parts.append(self._image_part(image_path))
+        parts.append({"text": prompt})
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": self._temperature,
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "object",
+                    "properties": {
+                        "approved": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["approved", "reason"],
+                    "propertyOrdering": ["approved", "reason"],
+                },
+            },
+        }
+        if self._max_output_tokens is not None:
+            payload["generationConfig"]["maxOutputTokens"] = self._max_output_tokens
+        response = self._request(payload)
+        try:
+            return str(response["candidates"][0]["content"]["parts"][0]["text"]).strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError(f"unexpected Gemini response shape: {_shorten_raw_output(json.dumps(response))}") from exc
+
+    def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self._model}:generateContent"
+        )
+        body = json.dumps(payload).encode("utf-8")
+        last_error: Exception | None = None
+        for attempt in range(self._retries):
+            req = urllib_request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self._api_key,
+                },
+            )
+            try:
+                with urllib_request.urlopen(req, timeout=self._timeout_seconds) as handle:
+                    return json.loads(handle.read().decode("utf-8"))
+            except urllib_error.HTTPError as exc:
+                last_error = exc
+                if exc.code not in {429, 500, 502, 503, 504} or attempt == self._retries - 1:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Gemini API HTTP {exc.code}: {_shorten_raw_output(detail)}") from exc
+            except urllib_error.URLError as exc:
+                last_error = exc
+                if attempt == self._retries - 1:
+                    raise RuntimeError(f"Gemini API request failed: {exc}") from exc
+            time.sleep(2 ** attempt)
+        raise RuntimeError(f"Gemini API request failed: {last_error}")
+
+
+class _OpenAIJudgeRuntime:
+    family = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str = "gpt-4o-mini",
+        image_root: str | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float = 0.0,
+        timeout_seconds: int = 60,
+        retries: int = 3,
+    ) -> None:
+        self._api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not self._api_key:
+            raise EnvironmentError("gemini_openai_two_vote requires OPENAI_API_KEY")
+        self._model = model
+        self._image_root = Path(image_root) if image_root else Path(".")
+        self._max_output_tokens = max_output_tokens
+        self._temperature = temperature
+        self._timeout_seconds = timeout_seconds
+        self._retries = max(1, retries)
+
+    def _resolved_image(self, record: dict[str, Any]) -> Path | None:
+        image_path = record.get("image")
+        if not image_path:
+            return None
+        candidate = Path(image_path)
+        if not candidate.is_absolute():
+            candidate = self._image_root / candidate
+        return candidate if candidate.exists() else None
+
+    def _image_url_part(self, image_path: Path) -> dict[str, Any]:
+        data = image_path.read_bytes()
+        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+        encoded = base64.b64encode(data).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime_type};base64,{encoded}",
+                "detail": "low",
+            },
+        }
+
+    def judge(self, record: dict[str, Any], criterion: str) -> str:
+        prompt = build_vote_prompt(record, criterion)
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        image_path = self._resolved_image(record)
+        if image_path is not None:
+            content.append(self._image_url_part(image_path))
+
+        payload = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": self._temperature,
+            "response_format": {"type": "json_object"},
+        }
+        if self._max_output_tokens is not None:
+            payload["max_tokens"] = self._max_output_tokens
+        response = self._request(payload)
+        try:
+            return str(response["choices"][0]["message"]["content"]).strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError(f"unexpected OpenAI response shape: {_shorten_raw_output(json.dumps(response))}") from exc
+
+    def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        last_error: Exception | None = None
+        for attempt in range(self._retries):
+            req = urllib_request.Request(
+                "https://api.openai.com/v1/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urllib_request.urlopen(req, timeout=self._timeout_seconds) as handle:
+                    return json.loads(handle.read().decode("utf-8"))
+            except urllib_error.HTTPError as exc:
+                last_error = exc
+                if exc.code not in {408, 409, 429, 500, 502, 503, 504} or attempt == self._retries - 1:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(f"OpenAI API HTTP {exc.code}: {_shorten_raw_output(detail)}") from exc
+            except urllib_error.URLError as exc:
+                last_error = exc
+                if attempt == self._retries - 1:
+                    raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
+            time.sleep(2 ** attempt)
+        raise RuntimeError(f"OpenAI API request failed: {last_error}")
+
+
+class GeminiLlavaTwoVoteBackend:
+    """Hosted Gemini + local LLaVA backend with a fixed two-vote decision.
+
+    Vote 1: Gemini hallucination removal
+    Vote 2: LLaVA content preservation
+
+    A pair passes only when both votes approve, so the final decision uses one
+    hosted Gemini vote and one local LLaVA vote.
+    """
+
+    name = "gemini_llava_two_vote"
+    policy_version = GEMINI_LLAVA_TWO_VOTE_POLICY_VERSION
+    approval_families_required = ("gemini", "llava")
+    vote_count = 2
+    approvals_required = 2
+
+    def __init__(
+        self,
+        *,
         llava_model_path: str,
         llava_model_base: str | None = None,
         llava_conv_mode: str = "vicuna_v1",
         image_root: str | None = None,
-        qwen_max_new_tokens: int = 256,
-        llava_max_new_tokens: int = 256,
-        qwen_temperature: float = 0.0,
+        gemini_model: str = "gemini-2.5-flash-lite",
+        gemini_max_output_tokens: int | None = None,
+        llava_max_new_tokens: int = 64,
+        gemini_temperature: float = 0.0,
         llava_temperature: float = 0.0,
-        qwen_runtime: Any | None = None,
+        llava_device: str | None = None,
+        gemini_runtime: Any | None = None,
         llava_runtime: Any | None = None,
     ) -> None:
-        self._qwen = qwen_runtime or _QwenJudgeRuntime(
-            qwen_model_path,
+        if llava_runtime is None:
+            _require_existing_path(llava_model_path, context="gemini_llava_two_vote llava_model_path")
+            if llava_model_base is not None:
+                _require_existing_path(llava_model_base, context="gemini_llava_two_vote llava_model_base")
+        self._gemini = gemini_runtime or _GeminiJudgeRuntime(
+            model=gemini_model,
             image_root=image_root,
-            max_new_tokens=qwen_max_new_tokens,
-            temperature=qwen_temperature,
+            max_output_tokens=gemini_max_output_tokens,
+            temperature=gemini_temperature,
         )
         self._llava = llava_runtime or _LlavaJudgeRuntime(
             llava_model_path,
@@ -472,14 +712,152 @@ class QwenLlavaEnsembleBackend:
             image_root=image_root,
             max_new_tokens=llava_max_new_tokens,
             temperature=llava_temperature,
+            device=llava_device,
         )
 
     def vote(self, record: dict[str, Any], *, vote_index: int, strict: bool = False) -> VoteDecision:
-        if vote_index not in _CRITERIA:
-            raise VerificationError(f"unsupported vote_index={vote_index}; expected 1..{VOTE_COUNT}")
+        if vote_index not in _GEMINI_LLAVA_FAMILY_BY_VOTE:
+            raise VerificationError(f"unsupported vote_index={vote_index}; expected 1..2")
         criterion = _CRITERIA[vote_index]
-        family = _ENSEMBLE_FAMILY_BY_VOTE[vote_index]
-        runtime = self._qwen if family == "qwen" else self._llava
+        family = _GEMINI_LLAVA_FAMILY_BY_VOTE[vote_index]
+        runtime = self._gemini if family == "gemini" else self._llava
+        try:
+            raw = runtime.judge(record, criterion)
+            payload = _extract_json_object(raw)
+            approved = _parse_boolean(payload.get("approved"))
+            reason = str(payload.get("reason") or "").strip() or "no reason provided"
+            return VoteDecision(
+                vote_index=vote_index,
+                criterion=criterion,
+                approved=approved,
+                reason=reason,
+                model_family=family,
+                backend_name=self.name,
+            )
+        except Exception as exc:
+            if strict:
+                raise VerificationError(f"{family} judge failed for vote {vote_index}: {exc}") from exc
+            return _build_parse_failure_vote(
+                vote_index=vote_index,
+                criterion=criterion,
+                backend_name=self.name,
+                model_family=family,
+                error=exc,
+            )
+
+
+class GeminiTwoVoteBackend:
+    """Hosted Gemini backend with a fixed two-vote decision.
+
+    Vote 1: Gemini hallucination removal
+    Vote 2: Gemini content preservation
+
+    This is the fastest Stage 3 path. A pair passes only when both Gemini votes
+    approve. It does not provide cross-family validation.
+    """
+
+    name = "gemini_two_vote"
+    policy_version = GEMINI_TWO_VOTE_POLICY_VERSION
+    approval_families_required = ("gemini",)
+    vote_count = 2
+    approvals_required = 2
+    supports_row_parallelism = True
+
+    def __init__(
+        self,
+        *,
+        image_root: str | None = None,
+        gemini_model: str = "gemini-2.5-flash-lite",
+        gemini_max_output_tokens: int | None = None,
+        gemini_temperature: float = 0.0,
+        gemini_runtime: Any | None = None,
+    ) -> None:
+        self._gemini = gemini_runtime or _GeminiJudgeRuntime(
+            model=gemini_model,
+            image_root=image_root,
+            max_output_tokens=gemini_max_output_tokens,
+            temperature=gemini_temperature,
+        )
+
+    def vote(self, record: dict[str, Any], *, vote_index: int, strict: bool = False) -> VoteDecision:
+        if vote_index not in _GEMINI_TWO_VOTE_FAMILY_BY_VOTE:
+            raise VerificationError(f"unsupported vote_index={vote_index}; expected 1..2")
+        criterion = _CRITERIA[vote_index]
+        family = _GEMINI_TWO_VOTE_FAMILY_BY_VOTE[vote_index]
+        try:
+            raw = self._gemini.judge(record, criterion)
+            payload = _extract_json_object(raw)
+            approved = _parse_boolean(payload.get("approved"))
+            reason = str(payload.get("reason") or "").strip() or "no reason provided"
+            return VoteDecision(
+                vote_index=vote_index,
+                criterion=criterion,
+                approved=approved,
+                reason=reason,
+                model_family=family,
+                backend_name=self.name,
+            )
+        except Exception as exc:
+            if strict:
+                raise VerificationError(f"{family} judge failed for vote {vote_index}: {exc}") from exc
+            return _build_parse_failure_vote(
+                vote_index=vote_index,
+                criterion=criterion,
+                backend_name=self.name,
+                model_family=family,
+                error=exc,
+            )
+
+
+class GeminiOpenAITwoVoteBackend:
+    """Hosted Gemini + OpenAI backend with a fixed two-vote decision.
+
+    Vote 1: Gemini hallucination removal
+    Vote 2: OpenAI content preservation
+
+    A pair passes only when both judges approve, so API failures or either
+    rejection send the row to Stage 4 repair.
+    """
+
+    name = "gemini_openai_two_vote"
+    policy_version = GEMINI_OPENAI_TWO_VOTE_POLICY_VERSION
+    approval_families_required = ("gemini", "openai")
+    vote_count = 2
+    approvals_required = 2
+    supports_row_parallelism = True
+
+    def __init__(
+        self,
+        *,
+        image_root: str | None = None,
+        gemini_model: str = "gemini-2.5-flash-lite",
+        gemini_max_output_tokens: int | None = None,
+        gemini_temperature: float = 0.0,
+        openai_model: str = "gpt-4o-mini",
+        openai_max_output_tokens: int | None = None,
+        openai_temperature: float = 0.0,
+        gemini_runtime: Any | None = None,
+        openai_runtime: Any | None = None,
+    ) -> None:
+        self._gemini = gemini_runtime or _GeminiJudgeRuntime(
+            model=gemini_model,
+            image_root=image_root,
+            max_output_tokens=gemini_max_output_tokens,
+            temperature=gemini_temperature,
+        )
+        self._openai = openai_runtime or _OpenAIJudgeRuntime(
+            model=openai_model,
+            image_root=image_root,
+            max_output_tokens=openai_max_output_tokens,
+            temperature=openai_temperature,
+        )
+
+    def vote(self, record: dict[str, Any], *, vote_index: int, strict: bool = False) -> VoteDecision:
+        if vote_index not in _GEMINI_OPENAI_FAMILY_BY_VOTE:
+            raise VerificationError(f"unsupported vote_index={vote_index}; expected 1..2")
+        criterion = _CRITERIA[vote_index]
+        family = _GEMINI_OPENAI_FAMILY_BY_VOTE[vote_index]
+        runtime = self._gemini if family == "gemini" else self._openai
         try:
             raw = runtime.judge(record, criterion)
             payload = _extract_json_object(raw)
@@ -510,9 +888,10 @@ def evaluate_votes(backend: VerificationBackend, votes: list[VoteDecision]) -> t
     approved_families = sorted(
         {vote.model_family for vote in votes if vote.approved and vote.model_family}
     )
+    approvals_required = int(getattr(backend, "approvals_required", APPROVALS_REQUIRED))
     required_families = tuple(getattr(backend, "approval_families_required", ()) or ())
     families_ok = all(family in approved_families for family in required_families)
-    passed = approvals >= APPROVALS_REQUIRED and families_ok
+    passed = approvals >= approvals_required and families_ok
     return passed, {
         "approved_families": approved_families,
         "approval_families_required": list(required_families),
@@ -525,27 +904,50 @@ def get_backend(name: str, **kwargs: Any) -> VerificationBackend:
     key = (name or "").strip().lower()
     if key == HeuristicVerificationBackend.name:
         return HeuristicVerificationBackend()
-    if key == QwenLlavaEnsembleBackend.name:
-        qwen_model_path = kwargs.get("qwen_model_path") or ""
+    if key == GeminiLlavaTwoVoteBackend.name:
         llava_model_path = kwargs.get("llava_model_path") or ""
-        if not qwen_model_path:
-            raise ValueError("qwen_llava_ensemble requires --qwen-model-path")
         if not llava_model_path:
-            raise ValueError("qwen_llava_ensemble requires --llava-model-path")
-        return QwenLlavaEnsembleBackend(
-            qwen_model_path=qwen_model_path,
+            raise ValueError("gemini_llava_two_vote requires --llava-model-path")
+        return GeminiLlavaTwoVoteBackend(
             llava_model_path=llava_model_path,
             llava_model_base=kwargs.get("llava_model_base"),
             llava_conv_mode=kwargs.get("llava_conv_mode", "vicuna_v1"),
             image_root=kwargs.get("image_root"),
-            qwen_max_new_tokens=int(kwargs.get("qwen_max_new_tokens", 256)),
-            llava_max_new_tokens=int(kwargs.get("llava_max_new_tokens", 256)),
-            qwen_temperature=float(kwargs.get("qwen_temperature", 0.0)),
+            gemini_model=kwargs.get("gemini_model", "gemini-2.5-flash-lite"),
+            gemini_max_output_tokens=_optional_int(kwargs.get("gemini_max_output_tokens")),
+            llava_max_new_tokens=int(kwargs.get("llava_max_new_tokens", 64)),
+            gemini_temperature=float(kwargs.get("gemini_temperature", 0.0)),
             llava_temperature=float(kwargs.get("llava_temperature", 0.0)),
-            qwen_runtime=kwargs.get("qwen_runtime"),
+            llava_device=kwargs.get("llava_device"),
+            gemini_runtime=kwargs.get("gemini_runtime"),
             llava_runtime=kwargs.get("llava_runtime"),
         )
-    available = ", ".join((HeuristicVerificationBackend.name, QwenLlavaEnsembleBackend.name))
+    if key == GeminiTwoVoteBackend.name:
+        return GeminiTwoVoteBackend(
+            image_root=kwargs.get("image_root"),
+            gemini_model=kwargs.get("gemini_model", "gemini-2.5-flash-lite"),
+            gemini_max_output_tokens=_optional_int(kwargs.get("gemini_max_output_tokens")),
+            gemini_temperature=float(kwargs.get("gemini_temperature", 0.0)),
+            gemini_runtime=kwargs.get("gemini_runtime"),
+        )
+    if key == GeminiOpenAITwoVoteBackend.name:
+        return GeminiOpenAITwoVoteBackend(
+            image_root=kwargs.get("image_root"),
+            gemini_model=kwargs.get("gemini_model", "gemini-2.5-flash-lite"),
+            gemini_max_output_tokens=_optional_int(kwargs.get("gemini_max_output_tokens")),
+            gemini_temperature=float(kwargs.get("gemini_temperature", 0.0)),
+            openai_model=kwargs.get("openai_model", "gpt-4o-mini"),
+            openai_max_output_tokens=_optional_int(kwargs.get("openai_max_output_tokens")),
+            openai_temperature=float(kwargs.get("openai_temperature", 0.0)),
+            gemini_runtime=kwargs.get("gemini_runtime"),
+            openai_runtime=kwargs.get("openai_runtime"),
+        )
+    available = ", ".join((
+        HeuristicVerificationBackend.name,
+        GeminiLlavaTwoVoteBackend.name,
+        GeminiTwoVoteBackend.name,
+        GeminiOpenAITwoVoteBackend.name,
+    ))
     raise ValueError(f"unknown stage3 backend {name!r}; available: {available}")
 
 
@@ -553,11 +955,15 @@ __all__ = [
     "VerificationBackend",
     "VerificationError",
     "HeuristicVerificationBackend",
-    "QwenLlavaEnsembleBackend",
+    "GeminiLlavaTwoVoteBackend",
+    "GeminiTwoVoteBackend",
+    "GeminiOpenAITwoVoteBackend",
     "VOTE_COUNT",
     "APPROVALS_REQUIRED",
     "VOTE_POLICY_VERSION",
-    "ENSEMBLE_VOTE_POLICY_VERSION",
+    "GEMINI_LLAVA_TWO_VOTE_POLICY_VERSION",
+    "GEMINI_TWO_VOTE_POLICY_VERSION",
+    "GEMINI_OPENAI_TWO_VOTE_POLICY_VERSION",
     "evaluate_votes",
     "get_backend",
 ]

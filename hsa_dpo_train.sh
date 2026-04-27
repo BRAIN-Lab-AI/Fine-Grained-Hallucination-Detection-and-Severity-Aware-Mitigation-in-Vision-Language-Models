@@ -7,6 +7,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_ROOT}"
 
+if [ -z "${VIRTUAL_ENV:-}" ] && [ -f "${REPO_ROOT}/.venv/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "${REPO_ROOT}/.venv/bin/activate"
+fi
+
 # Load repo-local overrides if present.
 ENV_FILE="${REPO_ROOT}/.env"
 if [ -f "${ENV_FILE}" ]; then
@@ -20,13 +25,19 @@ fi
 BATCH_SIZE="${BATCH_SIZE:-8}"
 EPOCH="${EPOCH:-2}"
 LEARNING_RATE="${LEARNING_RATE:-2e-6}"
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-16}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-}"
+MAX_STEPS="${MAX_STEPS:--1}"
 USE_CHOSEN_SCORE="${USE_CHOSEN_SCORE:-False}"
 USE_REJECTED_SCORE="${USE_REJECTED_SCORE:-True}"
+DPO_LOSS_TYPE="${DPO_LOSS_TYPE:-hsa_weighted}"
+SEVERITY_MARGIN_SCALE="${SEVERITY_MARGIN_SCALE:-0.5}"
+SEVERITY_SCORE_NORMALIZER="${SEVERITY_SCORE_NORMALIZER:-3.0}"
 
 # Project-local defaults. Override with env vars if needed.
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl}"
 IMAGE_FOLDER="${IMAGE_FOLDER:-${REPO_ROOT}/hsa_dpo/data/images}"
-MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/models/llava-v1.5-13b}"
+MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/models/llava-v1.5-7b}"
 VISION_TOWER="${VISION_TOWER:-openai/clip-vit-large-patch14-336}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/output/hsa_dpo_llava}"
 DS_CONFIG="${DS_CONFIG:-${REPO_ROOT}/hsa_dpo/models/llava-v1_5/scripts/zero3.json}"
@@ -61,6 +72,27 @@ if [ "${NUM_GPUS}" -gt "${AVAILABLE_GPUS}" ]; then
     NUM_GPUS="${AVAILABLE_GPUS}"
 fi
 
+PER_STEP_BATCH=$((BATCH_SIZE * NUM_GPUS))
+if [ "${PER_STEP_BATCH}" -le 0 ]; then
+    echo "Invalid batch configuration: BATCH_SIZE=${BATCH_SIZE}, NUM_GPUS=${NUM_GPUS}" >&2
+    exit 1
+fi
+
+if [ -z "${GRADIENT_ACCUMULATION_STEPS}" ]; then
+    GRADIENT_ACCUMULATION_STEPS=$(((TOTAL_BATCH_SIZE + PER_STEP_BATCH - 1) / PER_STEP_BATCH))
+fi
+
+if [ "${GRADIENT_ACCUMULATION_STEPS}" -le 0 ]; then
+    echo "Invalid GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS}" >&2
+    exit 1
+fi
+
+EFFECTIVE_TOTAL_BATCH=$((PER_STEP_BATCH * GRADIENT_ACCUMULATION_STEPS))
+if [ "${EFFECTIVE_TOTAL_BATCH}" -ne "${TOTAL_BATCH_SIZE}" ]; then
+    echo "Warning: effective total batch size ${EFFECTIVE_TOTAL_BATCH} differs from target TOTAL_BATCH_SIZE=${TOTAL_BATCH_SIZE}." >&2
+    echo "Set BATCH_SIZE, NUM_GPUS, or GRADIENT_ACCUMULATION_STEPS if you need an exact total batch." >&2
+fi
+
 # Training script entry point
 ENTRY="${ENTRY:-${REPO_ROOT}/hsa_dpo/models/llava-v1_5/train_dpo.py}"
 LLAVA_ROOT="${REPO_ROOT}/hsa_dpo/models/llava-v1_5"
@@ -87,6 +119,11 @@ require_path "${ENTRY}" "training entrypoint"
 require_path "${DS_CONFIG}" "DeepSpeed config"
 require_path "${LLAVA_ROOT}" "LLaVA source tree"
 
+if [ ! -s "${DATA_PATH}" ]; then
+    echo "Preference dataset is empty: ${DATA_PATH}" >&2
+    exit 1
+fi
+
 # Keep both the repo package and the bundled LLaVA tree importable.
 export PYTHONPATH="${REPO_ROOT}:${LLAVA_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -97,8 +134,13 @@ echo "Image folder: ${IMAGE_FOLDER}"
 echo "Model path: ${MODEL_PATH}"
 echo "Output directory: ${OUTPUT_DIR}"
 echo "Using ${NUM_GPUS} GPUs"
+echo "Per-device train batch size: ${BATCH_SIZE}"
+echo "Gradient accumulation steps: ${GRADIENT_ACCUMULATION_STEPS}"
+echo "Effective total batch size: ${EFFECTIVE_TOTAL_BATCH}"
+echo "Max steps: ${MAX_STEPS}"
 echo "Chosen score weighting: ${USE_CHOSEN_SCORE}"
 echo "Rejected score weighting: ${USE_REJECTED_SCORE}"
+echo "DPO loss type: ${DPO_LOSS_TYPE}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -121,9 +163,10 @@ deepspeed --num_gpus="${NUM_GPUS}" "${ENTRY}" \
     --bf16 True \
     --output_dir "${OUTPUT_DIR}" \
     --num_train_epochs "${EPOCH}" \
+    --max_steps "${MAX_STEPS}" \
     --per_device_train_batch_size "${BATCH_SIZE}" \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
     --evaluation_strategy "no" \
     --save_strategy "epoch" \
     --save_total_limit 2 \
@@ -141,6 +184,9 @@ deepspeed --num_gpus="${NUM_GPUS}" "${ENTRY}" \
     --deepspeed "${DS_CONFIG}" \
     --beta 0.1 \
     --use_chosen_score "${USE_CHOSEN_SCORE}" \
-    --use_rejected_score "${USE_REJECTED_SCORE}"
+    --use_rejected_score "${USE_REJECTED_SCORE}" \
+    --dpo_loss_type "${DPO_LOSS_TYPE}" \
+    --severity_margin_scale "${SEVERITY_MARGIN_SCALE}" \
+    --severity_score_normalizer "${SEVERITY_SCORE_NORMALIZER}"
 
 echo "Training completed!"

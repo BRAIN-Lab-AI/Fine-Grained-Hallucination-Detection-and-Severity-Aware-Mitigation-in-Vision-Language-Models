@@ -169,14 +169,19 @@ example:
 
 ```bash
 MODEL_PATH=models/llava-v1.5-13b
-QWEN_MODEL_PATH=models/Qwen-VL-Chat
 LLAVA_MODEL_PATH=models/llava-v1.5-13b
+BACKEND=gemini_openai_two_vote
+GEMINI_MODEL=gemini-2.5-flash-lite
+OPENAI_MODEL=gpt-4o-mini
+LLAVA_DEVICE=cuda:0
 NUM_GPUS=1
 BATCH_SIZE=1
-EPOCH=1
+TOTAL_BATCH_SIZE=32
+EPOCH=2
+LEARNING_RATE=2e-6
 ```
 
-The Stage 2, Stage 3, Stage 4, and pilot-train launchers now load this file
+The Stage 2, Stage 3, Stage 4, Stage 5, and pilot-train launchers now load this file
 automatically when it exists.
 
 ## 6. Step 5: Download The Base Model
@@ -192,9 +197,17 @@ The training script already points to:
 
 - `MODEL_PATH="./models/llava-v1.5-13b"`
 
-## 7. Step 6: Verify Repo Paths Before Running Training
+## 7. Step 6: Verify Repo Paths Before Running The Main Pipeline
 
-The paths that matter for baseline Stage 4 training:
+The paths that matter for the redesigned Stage 1-5 run:
+
+- Stage 3 audit: `./output/fghd/stage3/vote_records.jsonl`
+- Stage 3 approved pairs: `./output/fghd/stage3/preference_pairs.jsonl`
+- Stage 4 final pairs: `./output/fghd/stage4/final_preference_pairs.jsonl`
+- model path: `./models/llava-v1.5-13b`
+- Stage 5 output: `./output/fghd/stage5_llava_margin`
+
+The paths that matter for baseline-only HSA-DPO reproduction:
 
 - preference dataset: `./hsa_dpo/data/hsa_dpo_preference_llava1dot5.jsonl`
 - training image folder: `./hsa_dpo/data/images`
@@ -226,26 +239,48 @@ Use the real rewrite backend on a GPU box with:
 BACKEND=llava MODEL_PATH=models/llava-v1.5-13b bash scripts/run_stage2_rewrites.sh
 ```
 
-For the local research Stage 3 backend on a real GPU box:
+For the recommended cross-vendor research Stage 3 backend:
 
 ```bash
-QWEN_MODEL_PATH=models/Qwen-VL-Chat \
-LLAVA_MODEL_PATH=models/llava-v1.5-13b \
+BACKEND=gemini_openai_two_vote \
+GEMINI_MODEL=gemini-2.5-flash-lite \
+OPENAI_MODEL=gpt-4o-mini \
 bash scripts/run_stage3_validate.sh
 ```
 
-## 8. Step 7: Run Stage 4 Training (HSA-DPO Baseline)
+For a Gemini + local LLaVA validation run:
 
-For the redesigned Stage 1-4 project pipeline, run Stage 4 through the wrapper
-after Stage 3:
+```bash
+BACKEND=gemini_llava_two_vote \
+LLAVA_MODEL_PATH=models/llava-v1.5-13b \
+LLAVA_DEVICE=cuda:0 \
+bash scripts/run_stage3_validate.sh
+```
+
+## 8. Step 7: Run Stage 4 Repair And Stage 5 Training
+
+For the redesigned Stage 1-5 project pipeline, run Stage 4 repair after Stage 3:
 
 ```bash
 source .venv/bin/activate
-bash scripts/run_stage4_train.sh
+bash scripts/run_stage4_rewrite.sh
 ```
 
-This uses `output/fghd/stage3/preference_pairs.jsonl` as the training data and
-writes checkpoints under `output/fghd/stage4_llava`.
+This repairs only Stage 3 rejected rows and writes the combined training file at
+`output/fghd/stage4/final_preference_pairs.jsonl`.
+
+Then run Stage 5 training:
+
+```bash
+source .venv/bin/activate
+bash scripts/run_stage5_train.sh
+```
+
+This uses `output/fghd/stage4/final_preference_pairs.jsonl` as the training data
+and writes checkpoints under `output/fghd/stage5_llava_margin`. The default
+Stage 5 wrapper is paper-aligned: 2 epochs, LR `2e-6`, LoRA `r=128`,
+LoRA alpha `256`, beta `0.1`, frozen projector, and total batch size `32`
+through gradient accumulation.
 
 For a baseline-only reproduction run, use the released preference data
 directly:
@@ -282,6 +317,7 @@ On the remote instance, after the bootstrap script and model download:
 
 ```bash
 source .venv/bin/activate
+bash scripts/vastai/install_eval_benchmarks.sh
 bash scripts/run_paper_eval.sh
 bash scripts/run_general_eval.sh
 ```
@@ -290,6 +326,8 @@ bash scripts/run_general_eval.sh
 only by default. `run_general_eval.sh` writes general runtime summaries plus a
 separate supplemental local-eval report. Proxy or judge-like benchmarks that
 are not yet paper-faithful are intentionally kept out of the strict paper table.
+The installer prepares dependencies and folder layout; you still need to place
+the paper-matching benchmark assets under `playground/data/eval/`.
 
 ## 10. Minimal Workflow Summary
 
@@ -322,12 +360,13 @@ are not yet paper-faithful are intentionally kept out of the strict paper table.
    `BACKEND=llava MODEL_PATH=models/llava-v1.5-13b` for the real rewrite
    backend (the default `template` backend works without a model)
 6. optionally run `bash scripts/run_stage3_validate.sh` to build clean
-   preference pairs from the Stage 2 rewrites; if `QWEN_MODEL_PATH` and
-   `LLAVA_MODEL_PATH` are set, the launcher prefers the local Qwen+LLaVA
-   ensemble backend automatically
-7. run `bash scripts/run_stage4_train.sh` on a 2-GPU box for the redesigned
+   preference pairs from the Stage 2 rewrites; if `GEMINI_API_KEY` or
+   `GOOGLE_API_KEY` plus `OPENAI_API_KEY` is set, the launcher prefers
+   `gemini_openai_two_vote` automatically
+7. run `bash scripts/run_stage4_rewrite.sh` to repair Stage 3 rejects
+8. run `bash scripts/run_stage5_train.sh` on a GPU box for the redesigned
    pipeline, or `bash hsa_dpo_train.sh` for a baseline-only reproduction
-8. optionally run `bash scripts/run_paper_eval.sh` / `bash scripts/run_general_eval.sh`
+9. optionally run `bash scripts/run_paper_eval.sh` / `bash scripts/run_general_eval.sh`
 
 If you switch to a new template or GPU type, the first thing to copy over is:
 

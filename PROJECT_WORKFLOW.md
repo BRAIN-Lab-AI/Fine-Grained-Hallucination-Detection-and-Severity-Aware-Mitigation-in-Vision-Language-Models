@@ -11,9 +11,10 @@ For the full research method, see [README.md](README.md).
 
 ## Last Update
 
-- **Project method has been redesigned around four stages:** (1) critique
+- **Project method has been redesigned around five stages:** (1) critique
   detection / extraction, (2) critique-guided rewrite, (3) majority-vote
-  preference validation, (4) severity-aware DPO. The prior confidence-based
+  preference validation, (4) LLaVA repair of Stage 3 rejects, (5)
+  severity-margin DPO. The prior confidence-based
   Stages 3-5 remain removed; nothing about the new design brings back
   confidence scoring, temperature scaling, group-conditional thresholds,
   pair-confidence, or CRC / CV-CRC selection.
@@ -32,16 +33,18 @@ For the full research method, see [README.md](README.md).
   `RewriteBackend` protocol is exposed so other backends can be plugged
   in without changing the Stage 2 output schema.
 - **Stage 3 is implemented** as `fg_pipeline/stage3/`. It consumes Stage
-  2 rewrites, runs 3 verification votes per row, keeps pairs only when
-  at least 2 approve, writes a Stage 3 audit artifact, and exports
-  trainer-compatible preference pairs. The default
-  `HeuristicVerificationBackend` is deterministic and smoke-oriented; the
-  local research backend is now `qwen_llava_ensemble`, which requires at
-  least one approved Qwen vote and one approved LLaVA vote in addition to
-  the usual 2-of-3 approval rule.
-- **Stage 4 keeps the released HSA-DPO baseline trainer.**
-  `scripts/run_stage4_train.sh` now wraps `hsa_dpo_train.sh` so the new
-  Stage 3 preference pairs can flow into the unchanged trainer path.
+  2 rewrites, runs verification votes per row, writes a Stage 3 audit
+  artifact, and exports trainer-compatible preference pairs. The default
+  `HeuristicVerificationBackend` is deterministic and smoke-oriented; research
+  runs use `gemini_openai_two_vote`, `gemini_two_vote`, or `gemini_llava_two_vote`.
+- **Stage 4 is implemented** as `fg_pipeline/stage4/`. It repairs Stage 3
+  rejected rewrites with LLaVA, writes repair audit rows, and combines Stage 3
+  approved pairs plus repaired pairs into `output/fghd/stage4/final_preference_pairs.jsonl`.
+- **Stage 5 trains the final model** through `scripts/run_stage5_train.sh`.
+  It uses the final Stage 4 preference file and the new `severity_margin` DPO
+  objective. The older `scripts/run_stage4_train.sh` remains available only as
+  a Stage 3-only HSA-DPO baseline wrapper.
+- **The released HSA-DPO trainer remains the training stack.**
   `hsa_dpo_train.sh` still calls
   `hsa_dpo/models/llava-v1_5/train_dpo.py`, which uses
   `hsa_dpo.trainer.LlavaDPOTrainer` directly. A small, generic
@@ -58,9 +61,9 @@ For the full research method, see [README.md](README.md).
 The repo has two layers.
 
 - `hsa_dpo/`
-  Original HSA-DPO baseline. Still the active Stage 4 training stack.
+  Original HSA-DPO baseline. Still the active Stage 5 training stack.
 - `fg_pipeline/`
-  Extension layer. Hosts Stages 1-3, shared utilities, curated data
+  Extension layer. Hosts Stages 1-4, shared utilities, curated data
   fixtures, and the evaluation suite.
 
 ## Folder Layout
@@ -93,6 +96,10 @@ The repo has two layers.
 │   │   ├── prompts.py
 │   │   ├── backends.py
 │   │   └── run_stage3.py                         ← CLI entrypoint
+│   ├── stage4/                                   ← Stage 4 LLaVA repair
+│   │   ├── schemas.py
+│   │   ├── prompts.py
+│   │   └── run_stage4_repair.py                  ← CLI entrypoint
 │   ├── data/
 │   │   ├── hsa_dpo_detection.jsonl               ← Stage 1 input mirror
 │   │   ├── smoke_detection.jsonl                 ← Stage 1 smoke fixture
@@ -109,7 +116,9 @@ The repo has two layers.
 │   ├── run_stage1_export_benchmarks.sh           ← Stage 1 benchmark export
 │   ├── run_stage2_rewrites.sh                    ← Stage 2 launcher
 │   ├── run_stage3_validate.sh                    ← Stage 3 launcher
-│   ├── run_stage4_train.sh                       ← Stage 4 wrapper
+│   ├── run_stage4_rewrite.sh                     ← Stage 4 repair launcher
+│   ├── run_stage5_train.sh                       ← Stage 5 training launcher
+│   ├── run_stage4_train.sh                       ← legacy Stage 3-only training wrapper
 │   ├── run_paper_eval.sh
 │   ├── run_general_eval.sh
 │   └── vastai/                                   ← environment bootstrap
@@ -119,12 +128,14 @@ The repo has two layers.
 │   ├── test_stage1_backend_cli.py
 │   ├── test_stage2.py
 │   ├── test_stage3.py
+│   ├── test_stage4.py
+│   ├── test_stage5_loss.py
 │   ├── test_eval_pope_smoke.py
 │   ├── test_eval_reference_tables.py
 │   ├── test_eval_reporting.py
 │   └── test_eval_schemas.py
 │
-├── hsa_dpo_train.sh                              ← Stage 4 training entrypoint
+├── hsa_dpo_train.sh                              ← shared DPO training entrypoint
 └── vg/images/                                    ← Visual Genome images (Stage 1 supervision)
 ```
 
@@ -132,10 +143,10 @@ The repo has two layers.
 
 - Do not remove or rename files under `hsa_dpo/` unless we explicitly decide to patch the baseline.
 - `fg_pipeline/data/hsa_dpo_detection.jsonl` is a mirror of `hsa_dpo/data/hsa_dpo_detection.jsonl`.
-- `vg/images/` is the image store for the redesigned Stage 1-4 pipeline.
+- `vg/images/` is the image store for the redesigned Stage 1-5 pipeline.
   Stage 1 reads supervision rows that point into `vg/images/...`, and those
-  image paths are carried forward through Stage 2, Stage 3, and the redesigned
-  Stage 4 wrapper.
+  image paths are carried forward through Stage 2, Stage 3, Stage 4 repair,
+  and Stage 5 training.
 - `hsa_dpo/data/images/` is only for baseline preference training.
 - Do not mix the two image stores.
 
@@ -146,9 +157,11 @@ The repo has two layers.
 - Stage 2 — Critique-guided rewrite
   *(implemented; template backend is smoke-only; LLaVA backend is the research path)*
 - Stage 3 — Majority-vote preference validation
-  *(implemented; heuristic backend is smoke-only, Qwen+LLaVA ensemble is the local research path)*
-- Stage 4 — Severity-aware DPO
-  *(implemented via `scripts/run_stage4_train.sh` -> `hsa_dpo_train.sh`)*
+  *(implemented; heuristic backend is smoke-only, Gemini and Gemini+LLaVA are the research paths)*
+- Stage 4 — LLaVA repair of Stage 3 rejects
+  *(implemented via `scripts/run_stage4_rewrite.sh`)*
+- Stage 5 — Severity-margin DPO
+  *(implemented via `scripts/run_stage5_train.sh` -> `hsa_dpo_train.sh`)*
 
 For the released Stage 1 data, the sentence after `Description to Assess:` is
 the candidate response being evaluated. The normalized Stage 1 artifact stores
@@ -161,7 +174,9 @@ that sentence in `response_text`; the raw GPT supervision is preserved under
 - Stage 1 critique extraction (`fg_pipeline/stage1/` + `scripts/run_stage1_critiques.sh`).
 - Stage 2 critique-guided rewrite (`fg_pipeline/stage2/` + `scripts/run_stage2_rewrites.sh`).
 - Stage 3 majority-vote validation (`fg_pipeline/stage3/` + `scripts/run_stage3_validate.sh`).
-- Stage 4 training wrapper (`scripts/run_stage4_train.sh`) over the unchanged baseline trainer path.
+- Stage 4 LLaVA repair (`fg_pipeline/stage4/` + `scripts/run_stage4_rewrite.sh`).
+- Stage 5 severity-margin training wrapper (`scripts/run_stage5_train.sh`) over the HSA-DPO trainer path.
+- Legacy Stage 3-only HSA-DPO wrapper (`scripts/run_stage4_train.sh`) for baseline comparison.
 - Paper-core and general evaluation tooling under `fg_pipeline/eval/`.
 - Shared JSONL / path / schema utilities under `fg_pipeline/`.
 - Vast AI bootstrap scripts under `scripts/vastai/`.
@@ -171,8 +186,8 @@ that sentence in `response_text`; the raw GPT supervision is preserved under
 ## What We Will Do Next
 
 1. GPU-validate the Stage 1 detector path and Stage 2 rewrite path on Vast.
-2. Run the full Stage 1 -> Stage 4 pipeline on a suitable multi-GPU box,
-   but gate Stage 4 on a quick inspection of the Stage 3 preference pairs.
+2. Run the full Stage 1 -> Stage 5 pipeline on a suitable GPU box,
+   but inspect Stage 3 validation stats before Stage 4 repair and Stage 5 training.
 3. Reproduce the paper baseline separately with the released preference file.
 4. Keep strict paper comparison separate from supplemental local metrics.
 
@@ -261,54 +276,78 @@ python -m fg_pipeline.stage3.run_stage3 \
   --stats-out output/fghd/stage3/stats.json
 ```
 
-Useful flags: `--backend heuristic` (smoke default), `--limit N` for smoke
-runs, `--strict` to fail on malformed Stage 2 rows.
+Useful flags: `--backend heuristic|gemini_openai_two_vote|gemini_two_vote|gemini_llava_two_vote`
+(heuristic is smoke-only), `--limit N` for smoke runs, `--strict` to fail on
+malformed Stage 2 rows, `--resume`, and `--checkpoint-every`.
 
-For the local research backend:
+For the recommended cross-vendor research backend:
 
 ```bash
-QWEN_MODEL_PATH=models/Qwen-VL-Chat \
+BACKEND=gemini_openai_two_vote \
+GEMINI_MODEL=gemini-2.5-flash-lite \
+OPENAI_MODEL=gpt-4o-mini \
+bash scripts/run_stage3_validate.sh
+```
+
+For a cross-family Gemini + LLaVA run:
+
+```bash
+BACKEND=gemini_llava_two_vote \
 LLAVA_MODEL_PATH=models/llava-v1.5-13b \
+LLAVA_DEVICE=cuda:0 \
 bash scripts/run_stage3_validate.sh
 ```
 
 Stage 3 writes:
 
-- `output/fghd/stage3/vote_records.jsonl` — audit rows with 3 votes per rewrite
+- `output/fghd/stage3/vote_records.jsonl` — audit rows with verification votes per rewrite
 - `output/fghd/stage3/preference_pairs.jsonl` — trainer-compatible preference pairs
 - `output/fghd/stage3/stats.json` — compact validation counts
 
-Only rows with at least 2 approvals are kept for Stage 4.
+Rows approved by the selected backend flow directly into the final preference
+set. Rejected rows are sent to Stage 4 repair.
 
-Before launching Stage 4 on a long run, inspect:
+Before launching Stage 4 repair on a long run, inspect:
 
 - `output/fghd/stage3/stats.json`
 - a small sample of `output/fghd/stage3/preference_pairs.jsonl`
 
-The current smoke default is heuristic. The local research path is the
-`qwen_llava_ensemble` backend, which enforces both 2-of-3 approval and
-cross-family approval coverage.
+The current smoke default is heuristic. With `GEMINI_API_KEY` or
+`GOOGLE_API_KEY` plus `OPENAI_API_KEY` set, the launcher automatically selects
+`gemini_openai_two_vote`.
 
-If you do not have a local Qwen checkpoint on the Vast box yet, keep Stage 3 on
-the heuristic backend for bring-up and only switch to the ensemble after both
-model paths are present and a small smoke sample looks sane.
+### Stage 4 repair (LLaVA)
 
-### Stage 4 training (severity-aware DPO)
-
-For the redesigned Stage 1-4 pipeline, run Stage 4 through the wrapper after
-Stage 3:
+For the redesigned Stage 1-5 pipeline, run Stage 4 repair after Stage 3:
 
 ```bash
-bash scripts/run_stage4_train.sh
+bash scripts/run_stage4_rewrite.sh
 ```
 
-This points the unchanged trainer at
-`output/fghd/stage3/preference_pairs.jsonl` and writes checkpoints under
-`output/fghd/stage4_llava/`.
+This repairs only Stage 3 rejected rewrites and writes:
 
-For the redesigned pipeline, `scripts/run_stage4_train.sh` intentionally uses
-the repo root as `IMAGE_FOLDER` so Stage 3 preference rows with image paths
-such as `vg/images/...` resolve correctly.
+- `output/fghd/stage4/repair_records.jsonl`
+- `output/fghd/stage4/repair_preferences.jsonl`
+- `output/fghd/stage4/final_preference_pairs.jsonl`
+
+### Stage 5 training (severity-margin DPO)
+
+Run Stage 5 after Stage 4 has written the final preference file:
+
+```bash
+bash scripts/run_stage5_train.sh
+```
+
+This points the trainer at `output/fghd/stage4/final_preference_pairs.jsonl`
+and writes checkpoints under `output/fghd/stage5_llava_margin/`.
+The default Stage 5 launcher follows the paper hyperparameters: 2 epochs,
+LoRA rank 128, LoRA alpha 256, learning rate `2e-6`, total batch size 32,
+DPO beta 0.1, and frozen projector. On a one-GPU box it reaches total batch
+32 by using gradient accumulation.
+
+The legacy `scripts/run_stage4_train.sh` wrapper still points the unchanged
+trainer at `output/fghd/stage3/preference_pairs.jsonl`; use it only for the
+older Stage 3-only HSA-DPO baseline path.
 
 For a baseline-only reproduction run, keep using the released preference file
 directly:
@@ -327,24 +366,26 @@ Relevant knobs exposed by the script:
 
 - `USE_CHOSEN_SCORE` (default `False`)
 - `USE_REJECTED_SCORE` (default `True`; this is what reproduces the paper's severity-weighted rejected term)
-- `BATCH_SIZE`, `EPOCH`, `LEARNING_RATE`, `NUM_GPUS`
+- `DPO_LOSS_TYPE` (`hsa_weighted`, `severity_margin`, or `standard`)
+- `SEVERITY_MARGIN_SCALE`, `SEVERITY_SCORE_NORMALIZER`
+- `BATCH_SIZE`, `TOTAL_BATCH_SIZE`, `GRADIENT_ACCUMULATION_STEPS`, `EPOCH`, `LEARNING_RATE`, `NUM_GPUS`
 
-For a `1x RTX 6000 Ada (48 GB)` Vast instance, treat Stage 4 as a pilot run
-first. Use:
+For a `1x RTX 6000 Ada (48 GB)` Vast instance, use the paper-fair Stage 5
+wrapper after Stage 4 is complete:
 
 ```bash
-bash scripts/vastai/run_pilot_train.sh
+bash scripts/run_stage5_train.sh
 ```
 
-That wrapper defaults to `NUM_GPUS=1`, `BATCH_SIZE=1`, and `EPOCH=1`. Move to a
-larger or multi-GPU box only after the pilot run proves that the environment,
-data paths, and trainer wiring are correct.
+It defaults to `NUM_GPUS=1`, `BATCH_SIZE=1`, `TOTAL_BATCH_SIZE=32`, and
+`EPOCH=2`. Use `bash scripts/vastai/run_pilot_train.sh` only for a short
+environment sanity check, not for the final paper-comparison run.
 
 Current data limitation:
 
 - the released detection supervision does not expose the original user prompt
   separately
-- the `question` field carried from Stage 1 through Stage 4 may therefore
+- the `question` field carried from Stage 1 through Stage 5 may therefore
   mirror the assessed candidate sentence rather than a distinct upstream prompt
 
 ## Evaluation Guide
@@ -358,7 +399,7 @@ The repo has three evaluation layers.
   Captures local or proxy rows that are intentionally excluded from the
   strict paper delta table.
 - `bash scripts/run_general_eval.sh`
-  Summarizes Stage 3 validation stats, Stage 4 trainer state (when present),
+  Summarizes Stage 3 validation stats, Stage 5 trainer state (when present),
   and any selected public benchmark subset.
 
 Evaluation is manifest-driven. The runner expects:
@@ -377,6 +418,12 @@ Strict paper comparison is local-only. It validates the manifest and requires:
 The strict runner is only as fair as the benchmark adapter behind each row.
 Keep strict paper comparison separate from supplemental rows, and do not treat
 skipped local-judge benchmarks as missing paper deltas.
+Run `bash scripts/vastai/install_eval_benchmarks.sh` on Vast to install the
+evaluation extra and create the benchmark folder layout. Benchmark data itself
+must still be placed under `playground/data/eval/` from the matching sources.
+Supplemental judge benchmarks can use `OPENAI_JUDGE_MODEL` or
+`--openai-judge-model`, but those rows remain outside the strict table unless
+the adapter marks them paper-faithful.
 
 ## Vast AI Notes
 
@@ -395,9 +442,10 @@ skipped local-judge benchmarks as missing paper deltas.
   4. `BACKEND=llava MODEL_PATH=models/llava-v1.5-13b bash scripts/run_stage2_rewrites.sh`
   5. `bash scripts/run_stage3_validate.sh`
   6. inspect `output/fghd/stage3/stats.json`
-  7. `bash scripts/vastai/run_pilot_train.sh`
-- Do not start a long Stage 4 run on a single 48 GB GPU before checking that
-  Stage 2 rewrites and Stage 3 preference pairs are actually sane.
+  7. `bash scripts/run_stage4_rewrite.sh`
+  8. `bash scripts/vastai/run_pilot_train.sh` or `bash scripts/run_stage5_train.sh`
+- Do not start a long Stage 5 run on a single 48 GB GPU before checking that
+  Stage 2 rewrites, Stage 3 votes, and Stage 4 repairs are actually sane.
 
 Supplemental rows are reported separately when a benchmark is proxy-only,
 uses an unmatched local evaluator, or lacks a paper reference row.
@@ -406,4 +454,4 @@ uses an unmatched local evaluator, or lacks a paper reference row.
 
 - Treat this local repo as the canonical development copy; Vast was only a run environment.
 - Keep `hsa_dpo/` as the baseline layer.
-- Keep Stage 3 and Stage 4 on top of the Stage 1/2 record contracts; do not reintroduce a confidence-based path.
+- Keep Stage 3, Stage 4, and Stage 5 on top of the Stage 1/2 record contracts; do not reintroduce a confidence-based path.

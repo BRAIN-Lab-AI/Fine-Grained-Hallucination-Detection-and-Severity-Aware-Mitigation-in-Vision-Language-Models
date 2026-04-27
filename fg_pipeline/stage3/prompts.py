@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-PROMPT_VERSION = "judge_v1"
+PROMPT_VERSION = "judge_v2"
 
 _CRITERION_GUIDANCE = {
     "hallucination_removal": (
@@ -57,7 +57,12 @@ def build_vote_prompt(record: Any, criterion: str) -> str:
     )
     return (
         "You are verifying a hallucination-mitigation rewrite for a vision-language model.\n"
-        "Return strict JSON only with keys: approved (boolean), reason (string).\n"
+        "Return exactly one JSON object and no other text.\n"
+        "The JSON object must have exactly these keys: approved, reason.\n"
+        "approved must be a JSON boolean. reason must be one concrete sentence.\n"
+        "Do not include markdown, code fences, explanations, or text before or after the JSON.\n"
+        "Keep reason to 8 words or fewer, and do not use placeholder text.\n"
+        "Do not use the criterion name itself as the reason.\n"
         "Be conservative. Approve only when the rewrite clearly satisfies the criterion.\n\n"
         f"Criterion: {criterion}\n"
         f"Instruction: {guidance}\n\n"
@@ -65,7 +70,8 @@ def build_vote_prompt(record: Any, criterion: str) -> str:
         f"Original response:\n{original}\n\n"
         f"Rewrite response:\n{rewrite}\n\n"
         "Stage 1 critiques:\n"
-        f"{_format_critiques(payload)}\n"
+        f"{_format_critiques(payload)}\n\n"
+        "Return only the JSON object now.\n"
     )
 
 

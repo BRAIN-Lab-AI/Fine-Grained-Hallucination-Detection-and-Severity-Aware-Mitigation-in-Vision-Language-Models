@@ -7,6 +7,7 @@ import random
 import logging
 import argparse
 import sys
+import inspect
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -116,6 +117,9 @@ class ScriptArguments:
     beta: Optional[float] = field(default=0.5, metadata={"help": "the beta parameter for DPO loss"})
     use_chosen_score: Optional[bool] = field(default=False, metadata={"help": "whether to use chosen score in DPO loss"})
     use_rejected_score: Optional[bool] = field(default=True, metadata={"help": "whether to use rejected score in DPO loss"})
+    dpo_loss_type: Optional[str] = field(default="hsa_weighted", metadata={"help": "DPO loss type: hsa_weighted, severity_margin, or standard"})
+    severity_margin_scale: Optional[float] = field(default=0.5, metadata={"help": "severity margin multiplier for severity_margin DPO"})
+    severity_score_normalizer: Optional[float] = field(default=3.0, metadata={"help": "max severity score used to normalize severity margins"})
 
     # training parameters
     learning_rate: Optional[float] = field(default=5e-4, metadata={"help": "optimizer learning rate"})
@@ -774,7 +778,7 @@ def main():
         script_args.ddp_find_unused_parameters = False
     
     # initialize training arguments:
-    training_args = TrainingArguments(
+    training_kwargs = dict(
         per_device_train_batch_size=script_args.per_device_train_batch_size,
         per_device_eval_batch_size=script_args.per_device_eval_batch_size,
         max_steps=script_args.max_steps,
@@ -784,7 +788,6 @@ def main():
         gradient_checkpointing=script_args.gradient_checkpointing,
         ddp_find_unused_parameters=script_args.ddp_find_unused_parameters,
         learning_rate=script_args.learning_rate,
-        evaluation_strategy=script_args.evaluation_strategy,
         eval_steps=script_args.eval_steps,
         output_dir=script_args.output_dir,
         report_to=script_args.report_to,
@@ -806,6 +809,11 @@ def main():
         seed=script_args.seed,
         disable_tqdm=False,
     )
+    if "evaluation_strategy" in inspect.signature(TrainingArguments).parameters:
+        training_kwargs["evaluation_strategy"] = script_args.evaluation_strategy
+    else:
+        training_kwargs["eval_strategy"] = script_args.evaluation_strategy
+    training_args = TrainingArguments(**training_kwargs)
 
     print("Train:", training_args)
     # initialize the DPO trainer
@@ -816,11 +824,29 @@ def main():
         beta=script_args.beta,
         use_chosen_score=script_args.use_chosen_score,
         use_rejected_score=script_args.use_rejected_score,
+        dpo_loss_type=script_args.dpo_loss_type,
+        severity_margin_scale=script_args.severity_margin_scale,
+        severity_score_normalizer=script_args.severity_score_normalizer,
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_length=script_args.max_length,
         **data_module,
     )
+
+    if script_args.deepspeed and script_args.gradient_accumulation_steps > 1:
+        gradient_state = getattr(dpo_trainer.accelerator, "gradient_state", None)
+        plugin_kwargs = getattr(gradient_state, "plugin_kwargs", None)
+        if isinstance(plugin_kwargs, dict):
+            plugin_kwargs["sync_each_batch"] = True
+            print(
+                "Enabled Accelerate sync_each_batch for DeepSpeed gradient "
+                "accumulation; this avoids ZeRO-3 no_sync incompatibility."
+            )
+        else:
+            print(
+                "Warning: could not enable Accelerate sync_each_batch; "
+                "DeepSpeed ZeRO-3 may fail with gradient accumulation."
+            )
     
     # dpo_trainer.add_callback(SaverCallback())
     
