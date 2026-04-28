@@ -151,6 +151,32 @@ class LlavaRewriteBackend:
         model.eval()
         self._bundle = (tokenizer, model, image_processor)
 
+    def _resolve_image_path(self, image_path: Any) -> Path | None:
+        if not image_path:
+            return None
+        raw = str(image_path).strip()
+        if not raw:
+            return None
+
+        normalized = raw.replace("\\", "/")
+        candidates: list[Path] = []
+        for value in (raw, normalized):
+            path = Path(value)
+            candidates.append(path)
+            if not path.is_absolute():
+                candidates.append(self._image_root / path)
+                candidates.append(self._image_root / path.name)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.exists():
+                return candidate
+        return None
+
     def rewrite(self, record: Any, *, strict: bool = False) -> str:
         import torch
         from PIL import Image as PILImage
@@ -185,10 +211,8 @@ class LlavaRewriteBackend:
         image_tensor = None
         use_image = False
         if image_path_str:
-            candidate = Path(image_path_str)
-            if not candidate.is_absolute():
-                candidate = self._image_root / candidate
-            if candidate.exists():
+            candidate = self._resolve_image_path(image_path_str)
+            if candidate is not None and candidate.exists():
                 pil_image = PILImage.open(candidate).convert("RGB")
                 image_tensor = process_images(
                     [pil_image], image_processor, model.config
