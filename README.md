@@ -69,10 +69,12 @@ The implemented plan is:
 
 ### Reference Dataset
 
-- Released fine-grained hallucination supervision used to construct critique and preference data.
-- LLaVA-style image preference data under `hsa_dpo/data/`.
-- Visual Genome images when detection-side data paths require `vg/images/`.
-- Evaluation benchmarks: POPE, Object HalBench, and AMBER.
+- Released fine-grained hallucination supervision: [WenyiXiao/HSA-DPO on Hugging Face](https://huggingface.co/datasets/WenyiXiao/HSA-DPO) and the [official HSA-DPO repository](https://github.com/Mr-Loevan/HSA-DPO).
+- LLaVA-style image preference data: `hsa_dpo_preference_llava1dot5.jsonl` and `hsa_dpo_imgs.tar.gz` from the HSA-DPO dataset, prepared locally under `hsa_dpo/data/`.
+- Visual Genome images: [official Visual Genome downloads](https://homes.cs.washington.edu/~ranjay/visualgenome/api.html), used when detection-side paths require `vg/images/`.
+- POPE benchmark: [official POPE repository](https://github.com/RUCAIBox/POPE) and [lmms-lab/POPE on Hugging Face](https://huggingface.co/datasets/lmms-lab/POPE).
+- Object HalBench: evaluation data and scripts from [RLHF-V/RLAIF-V](https://github.com/RLHF-V/RLAIF-V), with COCO2014 annotations from the [official COCO dataset site](https://cocodataset.org/#download).
+- AMBER benchmark: [official AMBER repository](https://github.com/junyangwang0410/AMBER).
 
 ## Project Technicalities
 

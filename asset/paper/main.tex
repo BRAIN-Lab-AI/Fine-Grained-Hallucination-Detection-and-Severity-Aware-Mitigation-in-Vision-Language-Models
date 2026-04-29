@@ -600,11 +600,6 @@ The current chosen rewrite was rejected by the API judges. Revise it so it is be
 \subsection{Repaired-Pair Verification Prompt}
 \label{app:repair-verify-prompt}
 
-After LLaVA repair, the same Gemini/GPT validation prompt in Appendix~\ref{app:api-validation-prompt} is reused to verify repaired pairs. In the reported two-shot experiment, repaired-pair verification uses GPT-4.1-mini with the two-shot calibration block from Appendix~\ref{app:two-shot-validation-prompt}. The repaired answer is placed in the chosen-response field, the original hallucinated answer remains the rejected response, and the judge returns the same JSON schema:
-\begin{quote}
-\small
-\texttt{\{"approved": true/false, "reason": "one concise sentence"\}}
-\end{quote}
-Approved repaired rows are merged back into the judged-preference training set. Failed repaired rows are removed from that judged path.
+After LLaVA repair, the validation prompt in Appendix~\ref{app:api-validation-prompt} is reused to verify repaired pairs. In the two-shot experiment, GPT-4.1-mini uses the calibration block from Appendix~\ref{app:two-shot-validation-prompt}. The repaired answer is placed as $y^+$, the original hallucinated answer remains $y^-$, and the judge returns \texttt{\{"approved": true/false, "reason": "one concise sentence"\}}. Approved repairs are merged into the judged-preference training set; failed repairs are removed.
 
 \end{document}
