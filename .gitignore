@@ -89,6 +89,7 @@ scratch/
 tmp/
 /tmp_*/
 /local/
+/setup_logs/
 *.local
 *.local.json
 *.local.md
