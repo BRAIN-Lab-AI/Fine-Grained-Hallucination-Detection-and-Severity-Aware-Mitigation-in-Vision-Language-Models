@@ -49,7 +49,8 @@ The implemented plan is:
 6. Evaluate on POPE, Object HalBench, and AMBER.
 
 ### Project Documents
-- **Presentation PPTX:** [Project Presentation](asset/Fine-Grained%20Hallucination%20Detection%20and%20Severity-Aware%20Mitigation%20in%20Vision-Language.pptx)
+- **Presentation PDF:** [Project Presentation](asset/Fine-Grained%20Hallucination%20Detection%20and%20Severity-Aware%20Mitigation%20in%20Vision-Language.pdf)
+- **Presentation Source File:** [Project Presentation PPTX](asset/Fine-Grained%20Hallucination%20Detection%20and%20Severity-Aware%20Mitigation%20in%20Vision-Language.pptx)
 - **Term Paper PDF:** [Term Paper](main.pdf)
 - **Term Paper LaTeX Files:** [Paper Folder](asset/paper/)
 - **Methodology Diagram:** [Diagram](asset/diagram_overview.png)
